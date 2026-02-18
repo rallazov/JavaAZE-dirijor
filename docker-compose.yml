@@ -1,0 +1,16 @@
+# Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
+version: '3.9'
+services:
+  dirijor-supervisor:
+    build: ./backend/dirijor-core
+    ports: ["8000:8000"]
+  grok-agent:
+    build: ./backend/openclaw-wrapper
+    environment:
+      - HEADSCALE_URL=your-headscale-control-plane
+      - REALM_NAME=finance-swarm-001
+    depends_on: [dirijor-supervisor]
+  harper-security:
+    build: ./backend/openclaw-wrapper
+    environment:
+      - HEADSCALE_URL=your-headscale-control-plane

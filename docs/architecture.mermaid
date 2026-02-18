@@ -1,0 +1,20 @@
+graph TD
+    Human[👤 Human User] -->|Drag or Natural Language| App[🌐 Dirijor Canvas<br/>Next.js + React Flow]
+    App -->|WebSocket + API| Dirijor[🧠 Dirijor Core<br/>LangGraph Supervisor + A2A/MCP]
+    Dirijor <-->|Consensus + Routing| Safety[🛡️ Safety Fortress<br/>Verified Cache + Debate + Quarantine]
+    Dirijor -->|IaC Deploy| Realm[🏗️ Private Realm Manager<br/>Terraform Cloud-Agnostic]
+    Realm -->|Adapter| Cloud[☁️ Any Private Cloud<br/>DO / Hetzner / Proxmox / ...]
+    Cloud -->|Auto Provision| Mesh[🔒 Zero-Trust Mesh<br/>Headscale + mTLS]
+    Mesh -->|Private Channels| Runtime[⚙️ Agent Runtime<br/>Firecracker microVMs]
+    Runtime -->|Wrapped| OpenClaw[🦞 Secure OpenClaw Agents]
+    OpenClaw <-->|Tool Calls| External[🔌 Private Tools]
+    Dirijor <-->|Traces| Obs[📊 Observability<br/>Grafana]
+    Obs -->|Live Dashboard| App
+    Marketplace[🛒 Agent Marketplace] -->|Import| Realm
+
+    style Human fill:#4ade80,stroke:#166534
+    style App fill:#60a5fa,stroke:#1e40af
+    style Dirijor fill:#c084fc,stroke:#6b21a8
+    style Safety fill:#f87171,stroke:#991b1b
+    style Mesh fill:#34d399,stroke:#065f46
+    style OpenClaw fill:#fbbf24,stroke:#b45309
