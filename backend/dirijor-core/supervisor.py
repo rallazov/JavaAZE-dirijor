@@ -1,8 +1,11 @@
 # Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
 # Dirijor Supervisor – LangGraph Multi-Agent Consensus Brain
 
+from fastapi import FastAPI
 from langgraph.graph import StateGraph, END
 from typing import TypedDict
+
+# --- LangGraph Consensus Workflow ---
 
 class AgentState(TypedDict):
     messages: list
@@ -20,7 +23,30 @@ workflow.add_node("consensus", consensus_node)
 workflow.set_entry_point("consensus")
 workflow.add_edge("consensus", END)
 
-app = workflow.compile()
+graph = workflow.compile()
 
-def run_dirijor(query: str):
-    return app.invoke({"messages": [query], "consensus_score": 0.0, "verified_facts": []})
+# --- FastAPI Server ---
+
+app = FastAPI(title="Dirijor Supervisor", version="0.1.0")
+
+@app.get("/")
+def root():
+    return {
+        "service": "dirijor-supervisor",
+        "version": "0.1.0",
+        "status": "operational",
+        "consensus_engine": "ready",
+    }
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+@app.post("/consensus")
+def run_consensus(query: str = ""):
+    result = graph.invoke({
+        "messages": [query],
+        "consensus_score": 0.0,
+        "verified_facts": [],
+    })
+    return result
