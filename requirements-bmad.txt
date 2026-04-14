@@ -1,0 +1,2 @@
+# BMAD CLI helper: _bmad/core/bmad-init/scripts/bmad_init.py
+PyYAML>=6.0

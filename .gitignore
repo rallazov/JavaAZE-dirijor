@@ -1,0 +1,28 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Dependencies & build
+node_modules/
+dist/
+build/
+.next/
+out/
+*.pyc
+__pycache__/
+.venv/
+venv/
+
+# BMAD generated outputs (see _bmad/_memory/config.yaml output_folder)
+_bmad-output/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
