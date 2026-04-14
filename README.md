@@ -10,8 +10,8 @@ Drag-and-drop canvas + orchestration + multi-agent consensus + verified semantic
 
 **Quick Start**  
 1. `git clone` this private repo  
-2. `docker compose up` → your first 5-agent isolated realm spins in <60s  
-3. Open http://localhost:3000 → live Network Canvas
+2. `docker compose up` → supervisor API on http://localhost:8000 (frontend is not in Compose yet)  
+3. Network Canvas UI: `cd frontend && npm install && npm run dev` → http://localhost:3000 (redirects to `/canvas`)
 
 Built to never let you hallucinate again.  
 Ready for Phase 2 (full 12-cloud Terraform + live topology + marketplace).

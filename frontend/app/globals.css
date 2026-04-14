@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    /* Deep space + electric accents (Figma tokens align here when wired) */
+    --font-sans: "Avenir Next", "Segoe UI", "Helvetica Neue", system-ui, sans-serif;
+    --font-mono: "SFMono-Regular", "SF Mono", "Cascadia Mono", "Menlo", Monaco, Consolas, monospace;
+    --realm-bg: 222 47% 4%;
+    --realm-grid: 210 25% 38%;
+    --realm-glass: 220 22% 10%;
+    --realm-border: 210 18% 28%;
+    --realm-cyan: 186 100% 52%;
+    --realm-emerald: 152 76% 48%;
+    --realm-amber: 38 96% 58%;
+    --realm-crimson: 350 78% 52%;
+    --realm-muted: 215 16% 62%;
+  }
+
+  html {
+    @apply bg-realm-bg text-zinc-100;
+  }
+
+  body {
+    @apply min-h-dvh bg-realm-bg antialiased;
+    background-image: radial-gradient(
+        ellipse 120% 80% at 50% -30%,
+        hsl(var(--realm-cyan) / 0.07),
+        transparent 55%
+      ),
+      radial-gradient(ellipse 70% 50% at 100% 100%, hsl(var(--realm-emerald) / 0.05), transparent);
+  }
+}
+
+@layer utilities {
+  .glass-panel {
+    @apply border border-white/10 bg-realm-glass/85 backdrop-blur-xl shadow-glass;
+  }
+}
