@@ -1,20 +1,41 @@
 graph TD
-    Human[👤 Human User] -->|Drag or Natural Language| App[🌐 Dirijor Canvas<br/>Next.js + React Flow]
-    App -->|WebSocket + API| Dirijor[🧠 Dirijor Core<br/>LangGraph Supervisor + A2A/MCP]
-    Dirijor <-->|Consensus + Routing| Safety[🛡️ Safety Fortress<br/>Verified Cache + Debate + Quarantine]
-    Dirijor -->|IaC Deploy| Realm[🏗️ Private Realm Manager<br/>Terraform Cloud-Agnostic]
-    Realm -->|Adapter| Cloud[☁️ Any Private Cloud<br/>DO / Hetzner / Proxmox / ...]
-    Cloud -->|Auto Provision| Mesh[🔒 Zero-Trust Mesh<br/>Headscale + mTLS]
-    Mesh -->|Private Channels| Runtime[⚙️ Agent Runtime<br/>Firecracker microVMs]
-    Runtime -->|Wrapped| OpenClaw[🦞 Secure OpenClaw Agents]
-    OpenClaw <-->|Tool Calls| External[🔌 Private Tools]
-    Dirijor <-->|Traces| Obs[📊 Observability<br/>Grafana]
-    Obs -->|Live Dashboard| App
-    Marketplace[🛒 Agent Marketplace] -->|Import| Realm
+    %% Layer 0 - Humans
+    Human[👤 Human User / Team<br/>Ramin Allazov & users] -->|Natural Language or Drag-Drop| App[🌐 Dirijor Canvas<br/>Next.js + React Flow 2.0<br/>Live Topology + Safety Metrics]
 
-    style Human fill:#4ade80,stroke:#166534
-    style App fill:#60a5fa,stroke:#1e40af
-    style Dirijor fill:#c084fc,stroke:#6b21a8
-    style Safety fill:#f87171,stroke:#991b1b
-    style Mesh fill:#34d399,stroke:#065f46
+    %% Competitive Gap Layer
+    Hostinger[🏠 Hostinger / Other VPS<br/>1-click OpenClaw Docker<br/>Single Agent + Basic Container] -.->|Raw Power<br/>But NO network canvas<br/>NO multi-agent consensus<br/>NO hallucination fortress| Dirijor
+
+    %% Layer 1 - Control Plane
+    App -->|WebSocket + API| Dirijor[🧠 Dirijor Core<br/>LangGraph Supervisor + A2A/MCP Router<br/>Cloud-Agnostic (incl. Hostinger VPS)]
+
+    Dirijor <-->|Consensus & Routing| Safety[🛡️ Safety Fortress<br/>Multi-Agent Debate (≥95%)<br/>Verified Semantic Cache (Qdrant)<br/>Anomaly Auto-Quarantine<br/>Human-in-the-Loop + Audit Export]
+
+    %% Layer 2 - Realm Management
+    Dirijor -->|IaC Deploy| Realm[🏗️ Private Realm Manager<br/>Terraform/Pulumi Adapters<br/>Unlimited Instances]
+
+    Realm -->|Adapter| Cloud[☁️ Any Private Cloud<br/>Hostinger VPS • DigitalOcean • Hetzner • Proxmox • Self-hosted • ...]
+
+    %% Layer 3 - Network & Runtime Plane
+    Cloud -->|Auto Provision| Mesh[🔒 Zero-Trust Private Mesh<br/>Headscale/Tailscale + mTLS + WireGuard<br/>Firecracker microVM Sandboxing]
+
+    Mesh -->|Isolated Channels| Runtime[⚙️ Agent Runtime Plane<br/>Secure OpenClaw Wrapper<br/>+ Any other agents]
+
+    Runtime -->|Wrapped & Sandboxed| OpenClaw[🦞 OpenClaw Agents<br/>Skills Marketplace<br/>Multi-Channel]
+
+    OpenClaw <-->|Secure Tool Calls| External[🔌 Private Tools<br/>Browser • Shell • Email • Calendar]
+
+    %% Observability & Marketplace
+    Dirijor <-->|Traces + Hallucination Scores| Obs[📊 Observability<br/>Grafana + OpenTelemetry<br/>Live Consensus Heatmap]
+
+    Obs -->|Real-time Dashboard + Audit Package| App
+
+    Marketplace[🛒 Dirijor Agent Marketplace<br/>Verified Secure Swarm Templates] -->|Import → Auto-Sandbox| Realm
+
+    %% Styling
+    style Human fill:#4ade80,stroke:#166534,stroke-width:3px
+    style App fill:#60a5fa,stroke:#1e40af,stroke-width:3px
+    style Dirijor fill:#c084fc,stroke:#6b21a8,stroke-width:3px
+    style Safety fill:#f87171,stroke:#991b1b,stroke-width:4px
+    style Mesh fill:#34d399,stroke:#065f46,stroke-width:3px
     style OpenClaw fill:#fbbf24,stroke:#b45309
+    style Hostinger fill:#ef4444,stroke:#991b1b,stroke-dasharray: 5 5
