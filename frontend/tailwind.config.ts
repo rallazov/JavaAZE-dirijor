@@ -2,7 +2,7 @@ import type { Config } from 'tailwindcss';
 
 const config: Config = {
   darkMode: 'class',
-  content: ['./app/**/*.{js,ts,jsx,tsx}', './components/**/*.{js,ts,jsx,tsx}'],
+  content: ['./app/**/*.{js,ts,jsx,tsx}', './components/**/*.{js,ts,jsx,tsx}', './lib/**/*.{js,ts,jsx,tsx}'],
   theme: {
     extend: {
       colors: {
@@ -34,14 +34,26 @@ const config: Config = {
           '0%': { strokeDashoffset: '24' },
           '100%': { strokeDashoffset: '0' },
         },
+        'packet-flow': {
+          '0%': { strokeDashoffset: '0' },
+          '100%': { strokeDashoffset: '32' },
+        },
         'ring-pulse': {
           '0%, 100%': { opacity: '0.55' },
           '50%': { opacity: '1' },
         },
+        'safety-pulse-opacity': {
+          '0%, 100%': { opacity: '0.22' },
+          '50%': { opacity: '0.72' },
+        },
       },
       animation: {
         'flow-dash': 'flow-dash 1.1s linear infinite',
+        'packet-flow': 'packet-flow 4s linear infinite',
         'ring-pulse': 'ring-pulse 2.8s ease-in-out infinite',
+        'safety-pulse-fast': 'safety-pulse-opacity 2s ease-in-out infinite',
+        'safety-pulse-medium': 'safety-pulse-opacity 2.85s ease-in-out infinite',
+        'safety-pulse-slow': 'safety-pulse-opacity 3.6s ease-in-out infinite',
       },
       backgroundImage: {
         'realm-grid':

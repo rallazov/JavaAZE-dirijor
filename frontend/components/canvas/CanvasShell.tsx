@@ -18,7 +18,9 @@ import { InspectorPanel } from '@/components/inspector/InspectorPanel';
 import { RealmToolbar } from '@/components/canvas/RealmToolbar';
 import { StatusBar } from '@/components/canvas/StatusBar';
 import { Button } from '@/components/ui/button';
+import { RealmToastProvider } from '@/components/ui/realm-toast';
 import { useDirijorRealtime } from '@/hooks/useDirijorRealtime';
+import { scoreToMinimapColor } from '@/lib/safety-visual';
 import { useCanvasStore, REALM_NODE_EXTENT, REALM_TRANSLATE_EXTENT } from '@/store/canvas-store';
 import type { AgentNodeData } from '@/types/agent';
 import { cn } from '@/lib/utils';
@@ -28,6 +30,14 @@ const nodeTypes = { agent: AgentNode };
 const edgeTypes = { encrypted: AnimatedEdge };
 
 export function CanvasShell() {
+  return (
+    <RealmToastProvider>
+      <CanvasShellInner />
+    </RealmToastProvider>
+  );
+}
+
+function CanvasShellInner() {
   const nodes = useCanvasStore((s) => s.nodes) as Node<AgentNodeData>[];
   const edges = useCanvasStore((s) => s.edges) as Edge[];
   const onNodesChange = useCanvasStore((s) => s.onNodesChange);
@@ -37,9 +47,10 @@ export function CanvasShell() {
   const selectedId = useCanvasStore((s) => s.selectedNodeId);
   const inspectorOpen = useCanvasStore((s) => s.inspectorOpen);
   const setInspectorOpen = useCanvasStore((s) => s.setInspectorOpen);
+  const activeRealmId = useCanvasStore((s) => s.activeRealmId);
 
   /** Epic 3 — pass url when Core assigns a realm session */
-  useDirijorRealtime({ url: undefined, realmId: undefined });
+  useDirijorRealtime({ url: undefined, realmId: activeRealmId });
 
   const [live, setLive] = useState('');
 
@@ -111,18 +122,16 @@ export function CanvasShell() {
               />
               <MiniMap
                 position="bottom-right"
-                nodeStrokeWidth={3}
-                nodeColor={(n) => {
-                  const s = (n.data as AgentNodeData)?.status;
-                  if (s === 'critical') return 'hsl(350 78% 52%)';
-                  if (s === 'degraded' || s === 'pending') return 'hsl(38 96% 58%)';
-                  return 'hsl(186 100% 52%)';
-                }}
-                maskColor="rgba(0,0,0,0.78)"
-                className="!glass-panel !m-3 mb-[4.25rem] !overflow-hidden !rounded-lg !border !border-white/10 md:!mb-3"
+                nodeStrokeWidth={2}
+                nodeStrokeColor="rgba(255,255,255,0.14)"
+                nodeColor={(n) => scoreToMinimapColor((n.data as AgentNodeData)?.safetyScore ?? 0)}
+                maskColor="rgba(15,16,24,0.88)"
+                maskStrokeColor="rgba(34,211,238,0.12)"
+                style={{ background: 'hsl(222 47% 4% / 0.94)' }}
+                className="!m-3 mb-[4.25rem] !min-h-[104px] !min-w-[140px] !overflow-hidden !rounded-lg !border !border-white/12 !shadow-glass md:!mb-3"
                 pannable
                 zoomable
-                aria-label="Minimap"
+                aria-label="Canvas minimap — node colors match safety score tier"
               />
               <Panel
                 position="top-left"

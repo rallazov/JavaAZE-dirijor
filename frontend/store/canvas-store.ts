@@ -119,7 +119,10 @@ interface CanvasStore {
   realmDescription: string;
   /** Progressive disclosure: inspector column visibility (not persisted). */
   inspectorOpen: boolean;
+  /** Active realm for realtime + toolbar (stub multi-realm; not persisted). */
+  activeRealmId: string;
   setRealmDescription: (v: string) => void;
+  setActiveRealmId: (id: string) => void;
   setInspectorOpen: (open: boolean) => void;
   toggleInspector: () => void;
   onNodesChange: (changes: NodeChange[]) => void;
@@ -179,7 +182,9 @@ export const useCanvasStore = create<CanvasStore>()(
       pendingActions: initialPending,
       realmDescription: '',
       inspectorOpen: true,
+      activeRealmId: 'local',
       setRealmDescription: (realmDescription) => set({ realmDescription }),
+      setActiveRealmId: (activeRealmId) => set({ activeRealmId }),
       setInspectorOpen: (inspectorOpen) => set({ inspectorOpen }),
       toggleInspector: () => set((s) => ({ inspectorOpen: !s.inspectorOpen })),
       onNodesChange: (changes) => set({ nodes: applyNodeChanges(changes, get().nodes) }),

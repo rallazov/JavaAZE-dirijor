@@ -5,6 +5,12 @@ import { memo } from 'react';
 import { Handle, Position, type NodeProps } from 'reactflow';
 import { Activity, Fingerprint } from 'lucide-react';
 import { SafetyBadge } from '@/components/safety/SafetyBadge';
+import {
+  getSafetyScoreTier,
+  safetyTierOuterPulseClass,
+  safetyTierProgressStrokeClass,
+  safetyTierTextClass,
+} from '@/lib/safety-visual';
 import { cn } from '@/lib/utils';
 import type { AgentNodeData } from '@/types/agent';
 
@@ -15,8 +21,18 @@ const ringClass: Record<AgentNodeData['status'], string> = {
   pending: 'border-realm-muted',
 };
 
+/** Badge = qualitative AgentStatus; score ring = quantitative safetyScore (95+ / 80–94 / &lt;80). */
 function AgentNodeInner({ data, selected }: NodeProps<AgentNodeData>) {
   const pct = Math.round(data.safetyScore * 100);
+  const tier = getSafetyScoreTier(data.safetyScore);
+
+  const tierConic =
+    tier === 'high'
+      ? 'from_180deg_at_50%_50%,hsl(var(--realm-cyan)/0.14),transparent_62%'
+      : tier === 'mid'
+        ? 'from_180deg_at_50%_50%,hsl(var(--realm-amber)/0.12),transparent_62%'
+        : 'from_180deg_at_50%_50%,hsl(var(--realm-crimson)/0.11),transparent_62%';
+
   return (
     <div
       className={cn(
@@ -29,9 +45,11 @@ function AgentNodeInner({ data, selected }: NodeProps<AgentNodeData>) {
     >
       <div
         className={cn(
-          'pointer-events-none absolute inset-0 rounded-xl opacity-40',
-          'bg-[conic-gradient(from_180deg_at_50%_50%,hsl(var(--realm-cyan)/0.15),transparent_60%)]',
-          data.status === 'healthy' && 'animate-ring-pulse'
+          'pointer-events-none absolute inset-0 rounded-xl opacity-50',
+          `bg-[conic-gradient(${tierConic})]`,
+          tier === 'high' && 'animate-safety-pulse-fast',
+          tier === 'mid' && 'animate-safety-pulse-medium',
+          tier === 'low' && 'animate-safety-pulse-slow'
         )}
       />
       <Handle
@@ -49,23 +67,42 @@ function AgentNodeInner({ data, selected }: NodeProps<AgentNodeData>) {
       </div>
       <div className="relative mt-3 flex items-center gap-3">
         <div
-          className="relative grid size-11 shrink-0 place-items-center rounded-full border border-white/10"
+          className="relative grid size-[52px] shrink-0 place-items-center rounded-full border border-white/10"
           aria-hidden
         >
-          <svg className="size-11 -rotate-90" viewBox="0 0 36 36">
+          <svg className="absolute size-[52px] -rotate-90" viewBox="0 0 36 36">
             <circle cx="18" cy="18" r="15.5" fill="none" className="stroke-white/10" strokeWidth="3" />
+            <circle
+              cx="18"
+              cy="18"
+              r="17.5"
+              fill="none"
+              strokeWidth="1.25"
+              className={cn('fill-none', safetyTierOuterPulseClass[tier])}
+              pathLength={100}
+            />
             <circle
               cx="18"
               cy="18"
               r="15.5"
               fill="none"
-              className="stroke-realm-emerald transition-[stroke-dashoffset] duration-500"
+              className={cn(
+                'transition-[stroke-dashoffset] duration-500',
+                safetyTierProgressStrokeClass[tier]
+              )}
               strokeWidth="3"
               strokeDasharray={`${pct} ${100 - pct}`}
               pathLength={100}
             />
           </svg>
-          <span className="absolute font-mono text-[10px] font-semibold text-realm-emerald">{pct}</span>
+          <span
+            className={cn(
+              'relative font-mono text-[10px] font-semibold tabular-nums',
+              safetyTierTextClass[tier]
+            )}
+          >
+            {pct}
+          </span>
         </div>
         <div className="min-w-0 flex-1 space-y-1 text-xs text-realm-muted">
           <p className="flex items-center gap-1">

@@ -1,11 +1,13 @@
 // Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
 'use client';
 
-import { useMemo } from 'react';
-import { FileKey2, Shield } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { FileKey2, Loader2, Shield } from 'lucide-react';
 import { HumanLoopGate } from '@/components/safety/HumanLoopGate';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
+import { Button } from '@/components/ui/button';
+import { useRealmToast } from '@/components/ui/realm-toast';
 import { useHarperSecurity } from '@/hooks/useHarperSecurity';
 import { useCanvasStore } from '@/store/canvas-store';
 import { cn } from '@/lib/utils';
@@ -18,12 +20,36 @@ export function InspectorPanel({ className }: { className?: string }) {
   const pending = useCanvasStore((s) => s.pendingActions);
   const removePending = useCanvasStore((s) => s.removePending);
   const { verifyNode, getVerification } = useHarperSecurity();
+  const { toast } = useRealmToast();
+  const [reverifying, setReverifying] = useState(false);
 
   const agent = useMemo(
     () => nodes.find((n) => n.id === selectedId)?.data as AgentNodeData | undefined,
     [nodes, selectedId]
   );
   const verification = getVerification(selectedId);
+
+  const runReverify = async () => {
+    if (!selectedId) return;
+    setReverifying(true);
+    try {
+      await verifyNode(selectedId);
+      await new Promise((r) => setTimeout(r, 280));
+      toast({
+        title: 'Safety re-check complete',
+        description: 'Harper attestation updated for this agent (stub — wire to Core verify API).',
+        variant: 'success',
+      });
+    } catch {
+      toast({
+        title: 'Safety re-check failed',
+        description: 'Harper could not refresh attestation for this agent.',
+        variant: 'warn',
+      });
+    } finally {
+      setReverifying(false);
+    }
+  };
 
   return (
     <aside
@@ -45,33 +71,39 @@ export function InspectorPanel({ className }: { className?: string }) {
               Selection
             </h3>
             {agent ? (
-              <div className="space-y-2 rounded-lg border border-white/10 bg-black/25 p-3 text-sm">
+              <div className="space-y-3 rounded-lg border border-white/10 bg-black/25 p-3 text-sm">
                 <p className="font-semibold text-zinc-50">{agent.label}</p>
                 <p className="font-mono text-xs text-realm-muted">
                   Role: {agent.role} · Safety: {(agent.safetyScore * 100).toFixed(1)}%
                 </p>
-                <button
+                <Button
                   type="button"
-                  className="text-xs font-medium text-realm-cyan underline-offset-4 hover:underline"
-                  onClick={() => {
-                    if (selectedId) {
-                      void verifyNode(selectedId);
-                    }
-                  }}
+                  variant="outline"
+                  size="sm"
+                  className="w-full"
+                  disabled={reverifying}
+                  aria-busy={reverifying}
+                  onClick={() => void runReverify()}
                 >
-                  Re-verify with Harper
-                </button>
-                {verification && (
+                  {reverifying ? (
+                    <>
+                      <Loader2 className="animate-spin" aria-hidden />
+                      Re-verifying…
+                    </>
+                  ) : (
+                    'Re-verify safety'
+                  )}
+                </Button>
+                {verification ? (
                   <p className="font-mono text-[10px] text-realm-muted">
                     Last: {verification.fingerprint} @ {verification.checkedAt}
                   </p>
-                )}
+                ) : null}
               </div>
             ) : (
-              <p className="text-xs text-realm-muted">
-                Select an agent on the canvas. Keyboard: Tab moves focus between interactive controls; graph
-                navigation uses pointer.
-              </p>
+              <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-4 text-center text-sm text-realm-muted">
+                Select an agent to inspect • Safety context appears here
+              </div>
             )}
           </section>
 
@@ -110,7 +142,7 @@ export function InspectorPanel({ className }: { className?: string }) {
           <Separator />
 
           <section aria-labelledby="hitl-heading">
-            <h3 id="hitl-heading" className="mb-3 text-xs font-semibold text-zinc-200">
+            <h3 id="hitl-heading" className="mb-3 text-xs font-semibold text-realm-amber">
               Human in the loop
             </h3>
             <HumanLoopGate
