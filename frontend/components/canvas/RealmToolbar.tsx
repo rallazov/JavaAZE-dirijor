@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
 'use client';
 
-import { Loader2, Sparkles } from 'lucide-react';
+import { Loader2, PanelRight, PanelRightClose, RotateCcw, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Tooltip,
@@ -16,6 +16,9 @@ import { cn } from '@/lib/utils';
 export function RealmToolbar({ className }: { className?: string }) {
   const description = useCanvasStore((s) => s.realmDescription);
   const setDescription = useCanvasStore((s) => s.setRealmDescription);
+  const inspectorOpen = useCanvasStore((s) => s.inspectorOpen);
+  const toggleInspector = useCanvasStore((s) => s.toggleInspector);
+  const resetGraphToDemo = useCanvasStore((s) => s.resetGraphToDemo);
   const { phase, spinPrivateRealm, jobId } = useAwsSpin();
 
   return (
@@ -26,7 +29,43 @@ export function RealmToolbar({ className }: { className?: string }) {
           className
         )}
       >
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1 md:gap-2">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="shrink-0 text-realm-muted hover:text-realm-cyan"
+                onClick={() => toggleInspector()}
+                aria-expanded={inspectorOpen}
+                aria-controls="realm-inspector"
+                aria-label={inspectorOpen ? 'Hide inspector panel' : 'Show inspector panel'}
+              >
+                {inspectorOpen ? <PanelRightClose className="size-5" /> : <PanelRight className="size-5" />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              {inspectorOpen ? 'Hide inspector' : 'Show inspector'}
+            </TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="shrink-0 text-realm-muted hover:text-amber-200/90"
+                onClick={() => resetGraphToDemo()}
+                aria-label="Reset canvas to demo graph and metrics"
+              >
+                <RotateCcw className="size-5" aria-hidden />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="max-w-xs">
+              Reset canvas, metrics, and approval queue to the bundled demo (clears your realm description field).
+            </TooltipContent>
+          </Tooltip>
           <Sparkles className="size-5 text-realm-cyan" aria-hidden />
           <div>
             <p className="text-[10px] font-mono uppercase tracking-[0.2em] text-realm-muted">
