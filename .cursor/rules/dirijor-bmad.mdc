@@ -13,9 +13,9 @@ alwaysApply: true
 
 ## BMAD in this repo
 
-- Installed under `_bmad/` (BMM module). Config: `_bmad/_memory/config.yaml` (e.g. `output_folder: _bmad-output`).
-- Before acting as a BMAD persona (architect, PM, analyst, etc.), read that persona’s `SKILL.md` under `_bmad/bmm/...` and follow its **On Activation** steps (including loading config via `bmad-init` when the skill requires it).
-- Core init loader: `_bmad/core/bmad-init/SKILL.md` and `_bmad/core/bmad-init/scripts/bmad_init.py` (requires `pip install -r requirements-bmad.txt`).
+- Installed under `_bmad/` (BMM module) and configured for Cursor in `.cursor/skills/`. Config: `_bmad/_memory/config.yaml` (e.g. `output_folder: _bmad-output`).
+- Before acting as a BMAD persona (architect, PM, analyst, etc.) or running a BMAD task, read the matching `SKILL.md` under `.cursor/skills/bmad-*/` and follow its activation/workflow instructions.
+- BMAD CLI status/update command: `npx bmad-method status` or `npx bmad-method install --directory . --action update --modules bmm --tools cursor --yes`.
 - Write BMAD workflow outputs under `_bmad-output/` (gitignored), not scattered in `docs/` unless the user asks to promote a specific artifact.
 
 ## Implementation discipline

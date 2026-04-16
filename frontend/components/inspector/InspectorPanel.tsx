@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { FileKey2, Loader2, Shield } from 'lucide-react';
 import { HumanLoopGate } from '@/components/safety/HumanLoopGate';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -22,6 +22,37 @@ export function InspectorPanel({ className }: { className?: string }) {
   const { verifyNode, getVerification } = useHarperSecurity();
   const { toast } = useRealmToast();
   const [reverifying, setReverifying] = useState(false);
+  const [hitlAnnouncement, setHitlAnnouncement] = useState('');
+  const hitlSeqRef = useRef(0);
+  const hitlClearTimerRef = useRef<number | null>(null);
+
+  /**
+   * Story 1.6 AC3 — polite announcement on HITL approve/reject.
+   * Append an alternating trailing space so consecutive identical outcomes still mutate the
+   * live region (screen readers skip identical text). Clear after a pause so the region
+   * doesn't carry stale content across unrelated focus changes.
+   */
+  const announceHitl = useCallback((text: string) => {
+    hitlSeqRef.current += 1;
+    const padding = hitlSeqRef.current % 2 === 0 ? ' ' : '';
+    setHitlAnnouncement(text + padding);
+    if (hitlClearTimerRef.current !== null) {
+      window.clearTimeout(hitlClearTimerRef.current);
+    }
+    hitlClearTimerRef.current = window.setTimeout(() => {
+      setHitlAnnouncement('');
+      hitlClearTimerRef.current = null;
+    }, 4000);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (hitlClearTimerRef.current !== null) {
+        window.clearTimeout(hitlClearTimerRef.current);
+        hitlClearTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const agent = useMemo(
     () => nodes.find((n) => n.id === selectedId)?.data as AgentNodeData | undefined,
@@ -51,16 +82,46 @@ export function InspectorPanel({ className }: { className?: string }) {
     }
   };
 
+  const onApproveHitl = useCallback(
+    (id: string) => {
+      const a = pending.find((p) => p.id === id);
+      removePending(id);
+      announceHitl(
+        a ? `Approved: ${a.title}. Action removed from queue.` : 'Approved. Action removed from queue.'
+      );
+    },
+    [pending, removePending, announceHitl]
+  );
+
+  const onRejectHitl = useCallback(
+    (id: string) => {
+      const a = pending.find((p) => p.id === id);
+      removePending(id);
+      announceHitl(
+        a ? `Rejected: ${a.title}. Action removed from queue.` : 'Rejected. Action removed from queue.'
+      );
+    },
+    [pending, removePending, announceHitl]
+  );
+
   return (
-    <aside
+    <div
       className={cn(
         'glass-panel flex h-full min-h-0 w-full min-w-[min(100vw,24rem)] max-w-md flex-col border-l border-white/10 md:max-w-[420px]',
         className
       )}
-      aria-label="Inspector and approvals"
     >
+      <span className="sr-only" aria-live="polite" aria-atomic="true">
+        {hitlAnnouncement}
+      </span>
       <div className="border-b border-white/5 px-4 py-3">
-        <h2 className="text-[10px] font-mono uppercase tracking-[0.25em] text-realm-muted">Inspector</h2>
+        <h2
+          id="inspector-heading"
+          tabIndex={-1}
+          className="rounded text-[10px] font-mono uppercase tracking-[0.25em] text-realm-muted outline-none focus-visible:ring-2 focus-visible:ring-realm-cyan focus-visible:ring-offset-2 focus-visible:ring-offset-[hsl(222_47%_4%)]"
+        >
+          Inspector
+        </h2>
         <p className="text-sm font-medium text-zinc-100">Node & safety context</p>
       </div>
       <ScrollArea className="min-h-0 flex-1">
@@ -145,14 +206,10 @@ export function InspectorPanel({ className }: { className?: string }) {
             <h3 id="hitl-heading" className="mb-3 text-xs font-semibold text-realm-amber">
               Human in the loop
             </h3>
-            <HumanLoopGate
-              actions={pending}
-              onApprove={(id) => removePending(id)}
-              onReject={(id) => removePending(id)}
-            />
+            <HumanLoopGate actions={pending} onApprove={onApproveHitl} onReject={onRejectHitl} />
           </section>
         </div>
       </ScrollArea>
-    </aside>
+    </div>
   );
 }

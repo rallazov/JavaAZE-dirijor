@@ -119,12 +119,14 @@ interface CanvasStore {
   realmDescription: string;
   /** Progressive disclosure: inspector column visibility (not persisted). */
   inspectorOpen: boolean;
+  /** Last control that opened the inspector — used to restore focus on close (a11y). */
+  inspectorFocusReturn: 'toolbar' | 'fab';
   /** Active realm for realtime + toolbar (stub multi-realm; not persisted). */
   activeRealmId: string;
   setRealmDescription: (v: string) => void;
   setActiveRealmId: (id: string) => void;
-  setInspectorOpen: (open: boolean) => void;
-  toggleInspector: () => void;
+  setInspectorOpen: (open: boolean, focusFrom?: 'toolbar' | 'fab') => void;
+  toggleInspector: (focusFrom?: 'toolbar' | 'fab') => void;
   onNodesChange: (changes: NodeChange[]) => void;
   onEdgesChange: (changes: EdgeChange[]) => void;
   onConnect: (connection: Connection) => void;
@@ -182,11 +184,22 @@ export const useCanvasStore = create<CanvasStore>()(
       pendingActions: initialPending,
       realmDescription: '',
       inspectorOpen: true,
+      inspectorFocusReturn: 'toolbar',
       activeRealmId: 'local',
       setRealmDescription: (realmDescription) => set({ realmDescription }),
       setActiveRealmId: (activeRealmId) => set({ activeRealmId }),
-      setInspectorOpen: (inspectorOpen) => set({ inspectorOpen }),
-      toggleInspector: () => set((s) => ({ inspectorOpen: !s.inspectorOpen })),
+      setInspectorOpen: (open, focusFrom = 'toolbar') =>
+        set((s) =>
+          open
+            ? { inspectorOpen: true, inspectorFocusReturn: focusFrom }
+            : { inspectorOpen: false }
+        ),
+      toggleInspector: (focusFrom = 'toolbar') =>
+        set((s) =>
+          s.inspectorOpen
+            ? { inspectorOpen: false }
+            : { inspectorOpen: true, inspectorFocusReturn: focusFrom }
+        ),
       onNodesChange: (changes) => set({ nodes: applyNodeChanges(changes, get().nodes) }),
       onEdgesChange: (changes) => set({ edges: applyEdgeChanges(changes, get().edges) }),
       onConnect: (connection) => set({ edges: addEdge(connection, get().edges) }),
@@ -199,6 +212,7 @@ export const useCanvasStore = create<CanvasStore>()(
           selectedNodeId: null,
           metrics: initialMetrics,
           pendingActions: initialPending,
+          inspectorFocusReturn: 'toolbar',
         }),
     }),
     {

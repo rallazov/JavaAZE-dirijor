@@ -44,7 +44,8 @@ export function RealmToolbar({ className }: { className?: string }) {
                 variant="ghost"
                 size="icon"
                 className="shrink-0 text-realm-muted hover:text-realm-cyan"
-                onClick={() => toggleInspector()}
+                id="inspector-toggle-btn"
+                onClick={() => toggleInspector('toolbar')}
                 aria-expanded={inspectorOpen}
                 aria-controls="realm-inspector"
                 aria-label={inspectorOpen ? 'Hide inspector panel' : 'Show inspector panel'}

@@ -18,6 +18,7 @@ export function StatusBar({ className }: { className?: string }) {
       )}
       role="status"
       aria-live="polite"
+      aria-label="Realm status and metrics"
     >
       <span className="flex items-center gap-2 font-mono text-realm-muted">
         <Radio className="size-3.5 text-realm-cyan" aria-hidden />

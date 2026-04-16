@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
 'use client';
 
-import { useCallback, useEffect, useMemo, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import ReactFlow, {
   Background,
   BackgroundVariant,
@@ -46,6 +46,7 @@ function CanvasShellInner() {
   const selectNode = useCanvasStore((s) => s.selectNode);
   const selectedId = useCanvasStore((s) => s.selectedNodeId);
   const inspectorOpen = useCanvasStore((s) => s.inspectorOpen);
+  const inspectorFocusReturn = useCanvasStore((s) => s.inspectorFocusReturn);
   const setInspectorOpen = useCanvasStore((s) => s.setInspectorOpen);
   const activeRealmId = useCanvasStore((s) => s.activeRealmId);
 
@@ -71,6 +72,77 @@ function CanvasShellInner() {
   );
 
   const defaultEdgeOptions = useMemo(() => ({ type: 'encrypted' as const }), []);
+
+  const prevInspectorOpen = useRef<boolean | null>(null);
+  const focusRafRef = useRef<number | null>(null);
+
+  /**
+   * Story 1.6 — focus inspector title when panel opens; restore opener on close.
+   * Skip initial mount (don't steal focus if inspector is default-open).
+   * Cancel any pending rAF so rapid toggles don't race competing focus targets.
+   * For close: if preferred return target is hidden (e.g. FAB on desktop), fall back to toolbar toggle.
+   */
+  useEffect(() => {
+    const prev = prevInspectorOpen.current;
+    if (prev === null) {
+      prevInspectorOpen.current = inspectorOpen;
+      return;
+    }
+    if (prev === inspectorOpen) return;
+
+    if (focusRafRef.current !== null) {
+      cancelAnimationFrame(focusRafRef.current);
+      focusRafRef.current = null;
+    }
+
+    const opening = inspectorOpen;
+    focusRafRef.current = requestAnimationFrame(() => {
+      focusRafRef.current = null;
+      if (opening) {
+        document.getElementById('inspector-heading')?.focus();
+      } else {
+        const primaryId =
+          inspectorFocusReturn === 'fab' ? 'inspector-open-fab' : 'inspector-toggle-btn';
+        const primary = document.getElementById(primaryId) as HTMLElement | null;
+        const visible = primary && primary.offsetParent !== null;
+        const target =
+          visible ? primary : (document.getElementById('inspector-toggle-btn') as HTMLElement | null);
+        target?.focus();
+      }
+    });
+
+    prevInspectorOpen.current = inspectorOpen;
+  }, [inspectorOpen, inspectorFocusReturn]);
+
+  useEffect(() => {
+    return () => {
+      if (focusRafRef.current !== null) {
+        cancelAnimationFrame(focusRafRef.current);
+        focusRafRef.current = null;
+      }
+    };
+  }, []);
+
+  /**
+   * Story 1.6 AC5 — zoom controls + minimap stay out of sequential tab order (decorative).
+   * React Flow rerenders chrome independently of the store's `nodes` array (zoom, resize,
+   * interactive toggle), so observe the flow subtree and re-apply on any DOM mutation.
+   */
+  useEffect(() => {
+    const root = document.querySelector('.realm-flow');
+    if (!root) return;
+    const demote = () => {
+      root.querySelectorAll<HTMLButtonElement>('.react-flow__controls button').forEach((btn) => {
+        btn.setAttribute('tabindex', '-1');
+      });
+      const mm = root.querySelector('.react-flow__minimap');
+      if (mm) mm.setAttribute('tabindex', '-1');
+    };
+    demote();
+    const observer = new MutationObserver(demote);
+    observer.observe(root, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, []);
 
   return (
     <div className="flex h-dvh max-h-dvh min-h-0 flex-col overflow-hidden bg-realm-bg text-zinc-100">
@@ -105,8 +177,8 @@ function CanvasShellInner() {
               nodesDraggable
               nodesConnectable
               elevateNodesOnSelect
-              className="!bg-transparent"
-              aria-label="Private realm network canvas. Drag nodes, pan and zoom the view, connect agents to define encrypted flows."
+              className="realm-flow !bg-transparent"
+              aria-label="Private realm network canvas. Drag nodes, pan and zoom the view, connect agents to define encrypted flows. Keyboard: use Tab to reach the graph; Space activates the selected node in some browsers."
             >
               <Background
                 id="realm-grid-bg"
@@ -116,6 +188,7 @@ function CanvasShellInner() {
                 color="hsl(210 25% 38% / 0.35)"
                 className="!bg-transparent"
               />
+              {/* Story 1.6 AC5: decorative chrome — tab order demoted in useEffect; metrics also in StatusBar */}
               <Controls
                 className="glass-panel !m-3 overflow-hidden rounded-lg !border-white/10 !shadow-glass"
                 showInteractive={false}
@@ -145,6 +218,9 @@ function CanvasShellInner() {
 
         <aside
           id="realm-inspector"
+          {...(inspectorOpen
+            ? ({ 'aria-labelledby': 'inspector-heading' } as const)
+            : ({ 'aria-label': 'Inspector' } as const))}
           aria-hidden={!inspectorOpen}
           className={cn(
             'flex shrink-0 flex-col border-white/10 bg-realm-bg/98 backdrop-blur-xl transition-[width,opacity,transform] duration-300 ease-out md:border-l',
@@ -163,8 +239,9 @@ function CanvasShellInner() {
             type="button"
             variant="glass"
             size="icon"
+            id="inspector-open-fab"
             className="fixed bottom-20 right-4 z-30 size-12 rounded-full shadow-glow-cyan md:bottom-6 md:hidden"
-            onClick={() => setInspectorOpen(true)}
+            onClick={() => setInspectorOpen(true, 'fab')}
             aria-controls="realm-inspector"
             aria-label="Open inspector panel"
           >
