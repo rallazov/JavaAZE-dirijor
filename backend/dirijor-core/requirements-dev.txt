@@ -1,0 +1,11 @@
+# Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
+# Dev-only dependencies for dirijor-core.
+# Install from backend/dirijor-core/:
+#     python -m pip install -r requirements.txt -r requirements-dev.txt
+# The container image intentionally does NOT copy this file (tests stay off
+# the runtime surface — see Dockerfile).
+
+-r requirements.txt
+
+pytest>=8.0.0
+httpx>=0.27.0
