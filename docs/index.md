@@ -1,0 +1,97 @@
+<!--
+Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
+-->
+
+# Dirijor — Private Agent Network OS
+
+**The world's first human-first Private Agent Network Operating System.**
+
+Drag-and-drop canvas + orchestration + multi-agent consensus + verified
+semantic cache = **zero hallucination, zero exposure**, on infrastructure
+you own.
+
+---
+
+## What is the point of Dirijor?
+
+Three versions of the same answer, pick the one that fits your conversation.
+
+### 10-second pitch
+
+> Zero-trust operating system for LLM agents — **private by default,
+> hallucination-proof by design**.
+
+### 60-second pitch
+
+> **Problem.** LLM agents are powerful but unsafe at scale: they hallucinate,
+> leak data, and expose private networks to the public internet.
+> Existing 1-click hosts (Hostinger, Replit, etc.) solve convenience —
+> not safety.
+>
+> **Tension.** Teams either ship fast and accept risk, or lock everything
+> down and ship nothing.
+>
+> **Insight.** Safety and speed aren't opposites if the control plane is
+> private-by-default, consensus-verified, and visually composable.
+>
+> **Product.** Dirijor is the Private Agent Network OS. Drag agents on a
+> canvas → Dirijor provisions a zero-trust mesh on any cloud you own,
+> runs every high-stakes output through a multi-agent debate
+> (≥95% agreement), and exports a compliance package on demand.
+> You get the speed of a 1-click host with the safety posture of a
+> regulated enterprise — on infrastructure you own.
+
+### 5-minute pitch
+
+Read [**Why Dirijor**](product/why-dirijor.md) — the long-form problem,
+insight, and product narrative. It's the page to send a skeptic, an
+investor, or a security reviewer.
+
+---
+
+## Start here
+
+=== "I want to understand Dirijor"
+
+    1. [**Why Dirijor**](product/why-dirijor.md) — the problem we solve and the bet we're making.
+    2. [**Realms**](product/concepts/realms.md) — the atomic unit of Dirijor.
+    3. [**Consensus**](product/concepts/consensus.md) — how we reach "zero hallucination on high-stakes outputs."
+    4. [**Zero-trust by default**](product/concepts/zero-trust.md) — why no public exposure is a *default*, not a feature.
+
+=== "I want to try Dirijor"
+
+    1. [**Tutorial — your first private realm**](guides/tutorials/01-first-realm.md) — 10–15 minutes, ends with a running realm.
+    2. [**Supervisor HTTP API (v0.1)**](reference/supervisor-api.md) — the stable contract the canvas and your tooling bind to.
+
+=== "I want to build on / contribute to Dirijor"
+
+    1. [**Architecture overview**](architecture/overview.md) — a narrated walk through `docs/architecture.mermaid`.
+    2. [**Architecture Decision Records**](architecture/adr/README.md) — *why* we chose LangGraph, why consensus is ≥95%, etc.
+    3. [**Project context for contributors & agents**](project-context.md) — engineering conventions.
+    4. **BMAD workflow** — this repo uses BMAD skills for product + dev; see `AGENTS.md` and `.cursor/rules/dirijor-bmad.mdc` at the repo root.
+
+---
+
+## Non-negotiable promises
+
+These come from the [PRD](DIRIJOR-PRD.md) and drive every page on this site:
+
+- Drag-and-drop Network Canvas with live topology.
+- One-click private realm provisioning with Headscale/Tailscale mesh + mTLS + Firecracker sandboxing.
+- LangGraph-based supervisor with multi-agent consensus (**≥95% agreement**) + Verified Semantic Cache.
+- Safety Fortress: debate loops, anomaly auto-quarantine, human-in-the-loop gates, immutable audit export.
+- Cloud-agnostic IaC (Terraform / Pulumi adapters).
+- **100% private** — zero public internet exposure by default.
+
+When any page contradicts this list, the PRD wins. File a docs PR.
+
+---
+
+## Current status (v0.1)
+
+- **Supervisor HTTP contract** hardened (Story 3.1, done 2026-04-16 — see `_bmad-output/implementation-artifacts/3-1-supervisor-hardening-health-endpoints.md` in the repo) — see [Supervisor API reference](reference/supervisor-api.md).
+- **Canvas shell** operational through Story 1.6 (a11y MVP done).
+- **Consensus engine** is a v0.1 placeholder — real debate loop lands in Story 3.2.
+- **Mesh** and **Verified Semantic Cache** are wired into the readiness contract but not yet provisioned (Stories 5.1 and 4.1).
+
+The [reference](reference/supervisor-api.md) page is always the truth about what's running *today*.

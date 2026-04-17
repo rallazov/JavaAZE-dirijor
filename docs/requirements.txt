@@ -1,0 +1,8 @@
+# Docs site (MkDocs Material) — dev-only, not part of runtime.
+# Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
+#
+# Usage:  pip install -r docs/requirements.txt && mkdocs serve
+
+mkdocs>=1.6.0
+mkdocs-material>=9.5.0
+pymdown-extensions>=10.7.0

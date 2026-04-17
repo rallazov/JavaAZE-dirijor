@@ -13,6 +13,25 @@ Drag-and-drop canvas + orchestration + multi-agent consensus + verified semantic
 2. `docker compose up` → supervisor API on http://localhost:8000 (frontend is not in Compose yet)  
 3. Network Canvas UI: `cd frontend && npm install && npm run dev` → http://localhost:3000 (redirects to `/canvas`)
 
+**Documentation**
+
+Narrative docs live in [`docs/`](docs/) and are organized by what you're trying to do
+([Diátaxis](https://diataxis.fr/) framework):
+
+- [`docs/index.md`](docs/index.md) — elevator pitch (10s / 60s / 5min versions) + "start here" map.
+- [`docs/product/why-dirijor.md`](docs/product/why-dirijor.md) — the long-form answer to *"what is the point of your application?"*.
+- [`docs/product/concepts/`](docs/product/concepts/) — Realms, Consensus, Zero-trust by default.
+- [`docs/guides/tutorials/01-first-realm.md`](docs/guides/tutorials/01-first-realm.md) — 10–15 min hands-on.
+- [`docs/reference/supervisor-api.md`](docs/reference/supervisor-api.md) — authoritative v0.1 HTTP contract (see below).
+- [`docs/architecture/overview.md`](docs/architecture/overview.md) + [`docs/architecture/adr/`](docs/architecture/adr/) — system walkthrough and the *why* behind the big engineering bets (ADR-0001 LangGraph supervisor, ADR-0002 consensus ≥95%).
+
+Browse locally with:
+
+```bash
+pip install -r docs/requirements.txt
+mkdocs serve     # http://127.0.0.1:8000
+```
+
 ## Dirijor Supervisor (backend/dirijor-core) — v0.1 HTTP contract
 
 Story 3.1 hardened the supervisor's `GET /` and `GET /health` endpoints into a

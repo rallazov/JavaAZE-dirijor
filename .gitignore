@@ -22,6 +22,9 @@ venv/
 # BMAD generated outputs (see _bmad/_memory/config.yaml output_folder)
 _bmad-output/
 
+# MkDocs build output (docs/ is the source; site/ is generated)
+site/
+
 # Terraform
 .terraform/
 *.tfstate

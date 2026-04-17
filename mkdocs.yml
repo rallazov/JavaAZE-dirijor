@@ -1,0 +1,108 @@
+# Dirijor documentation site
+# Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
+#
+# Serve locally:  pip install -r docs/requirements.txt && mkdocs serve
+# Build static:   mkdocs build       (outputs to ./site/, gitignored)
+
+site_name: Dirijor — Private Agent Network OS
+site_description: The world's first human-first Private Agent Network Operating System.
+site_author: Ramin Allazov (JavaAZE)
+site_url: https://dirijor.local/docs/      # placeholder until hosting lands
+repo_name: JavaAZE-dirijor
+repo_url: https://github.com/JavaAZE/JavaAZE-dirijor    # adjust when repo is public
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+
+# docs/README.md is kept for GitHub's folder landing view but excluded
+# from the MkDocs site (it would conflict with docs/index.md). The leading
+# slash scopes the exclusion to the docs root only, so architecture/adr/README.md
+# (the ADR index) still renders.
+exclude_docs: |
+  /README.md
+
+theme:
+  name: material
+  language: en
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: cyan
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: cyan
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - toc.follow
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+    - content.action.edit
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+plugins:
+  - search
+
+# Diátaxis nav: Product (why) / Guides (how) / Reference (what exactly) /
+# Architecture (how it's built & why) / Contributing (internal).
+nav:
+  - Home: index.md
+  - Product:
+      - Why Dirijor: product/why-dirijor.md
+      - Concepts:
+          - Realms: product/concepts/realms.md
+          - Consensus: product/concepts/consensus.md
+          - Zero-Trust by Default: product/concepts/zero-trust.md
+  - Guides:
+      - Tutorials:
+          - First private realm: guides/tutorials/01-first-realm.md
+  - Reference:
+      - Supervisor HTTP API (v0.1): reference/supervisor-api.md
+  - Architecture:
+      - Overview: architecture/overview.md
+      - Decision Records:
+          - Index: architecture/adr/README.md
+          - "ADR-0001: LangGraph supervisor": architecture/adr/0001-langgraph-supervisor.md
+          - "ADR-0002: Consensus threshold ≥95%": architecture/adr/0002-consensus-threshold-95.md
+  - Canonical sources:
+      - Product Requirements (PRD): DIRIJOR-PRD.md
+      - Project context (contributors): project-context.md
+
+extra:
+  generator: false

@@ -1,0 +1,52 @@
+# lychee — external link checker config.
+# Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
+#
+# Used by .github/workflows/docs.yml to prevent docs rot.
+# Run locally:  cargo install lychee && lychee --config .lychee.toml docs/**/*.md
+# Or via Docker: docker run --rm -v "$PWD:/input" lycheeverse/lychee \
+#                  --config /input/.lychee.toml /input/docs/**/*.md
+
+# Network hygiene: retry once, be patient with slow hosts, honor rate limits.
+max_retries = 1
+retry_wait_time = 2
+timeout = 20
+max_concurrency = 8
+
+# Pretend to be a browser — some hosts 403 the default lychee user-agent.
+user_agent = "Mozilla/5.0 (compatible; lychee/0.15; +https://lychee.cli.rs)"
+
+# Treat these HTTP codes as success. 403 is common on hosts that 403 bots
+# even with a browser UA; the URL still exists and we don't want to churn on it.
+accept = [200, 201, 202, 203, 204, 206, 301, 302, 303, 307, 308, 403, 429]
+
+# Cache results between runs on CI so we don't hammer external hosts on
+# every docs PR. Cache lives in the runner and is invalidated daily.
+cache = true
+max_cache_age = "1d"
+
+# Validate mailto:, http(s):, and file:// links. Skip tel:, data:, etc.
+scheme = ["https", "http", "mailto"]
+
+# Resolve relative links from the repo root, not the markdown file's directory.
+base = "."
+
+# Private/local/placeholder hosts we don't want to probe from CI.
+exclude = [
+  # Placeholder repo URL — the repo is private today; swap when public.
+  "^https?://github\\.com/JavaAZE/JavaAZE-dirijor($|/)",
+  # Placeholder docs hosting URL from mkdocs.yml site_url
+  "^https?://dirijor\\.local(/|$)",
+  # Anything pointing at the developer's own loopback (tutorial `curl` examples)
+  "^https?://(localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0)(:\\d+)?(/|$)",
+  # The "fake" in-repo archive examples use example.com — they're illustrative.
+  "^https?://example\\.(com|org|net)(/|$)",
+]
+
+# Skip anchor-only links (#section) — mkdocs-strict already validates those.
+include_fragments = false
+
+# Don't follow redirects forever; three hops is enough to spot moves.
+max_redirects = 3
+
+# Private-repo GitHub API links won't resolve without auth; skip them here.
+# (Add to `exclude` above if any appear in docs.)
