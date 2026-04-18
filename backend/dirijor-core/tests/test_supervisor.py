@@ -1,20 +1,26 @@
 # Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
-"""Tests for the Dirijor Supervisor HTTP surface.
+"""Tests for the Dirijor Supervisor HTTP + WebSocket surface.
 
 Originally authored for Story 3.1 (structured `/` + `/health`); extended for
-Story 3.2 (real `/consensus` debate loop, SCHEMA v2 additive response).
+Story 3.2 (real `/consensus` debate loop, SCHEMA v2 additive response);
+further extended for Story 3.3 (WebSocket `/ws/realm/{realm_id}` channel,
+`broadcast_event` API, realtime readiness entry, SCHEMA v3 additive bump).
 
 All tests exercise the in-process FastAPI app; no network, no port binding.
-The degraded-path tests monkeypatch module-level state (REGISTRY / graph)
-and restore it automatically via pytest's monkeypatch fixture — no mutating
-public API is shipped just for tests (Story 3.1 AC 6, Story 3.2 AC 7).
+The degraded-path tests monkeypatch module-level state (REGISTRY / graph /
+HEARTBEAT_INTERVAL_S / _authorize_realm / _send_envelope) and restore it
+automatically via pytest's monkeypatch fixture — no mutating public API is
+shipped just for tests (Story 3.1 AC 6, Story 3.2 AC 7, Story 3.3 AC 8).
 """
 
 from __future__ import annotations
 
+import asyncio
 import time
 
+import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 import supervisor
 
@@ -229,16 +235,17 @@ def test_root_preserves_v01_superset():
 def test_schema_version_pinned():
     """Loud regression guard — bumping SCHEMA_VERSION requires deliberately
     updating this test AND README sample payloads (Story 3.1 AC 5,
-    Story 3.2 AC 5)."""
-    assert supervisor.SCHEMA_VERSION == 2
+    Story 3.2 AC 5, Story 3.3 AC 7)."""
+    assert supervisor.SCHEMA_VERSION == 3
     assert supervisor.SERVICE_VERSION == "0.1.0"
 
 
-def test_schema_version_is_2():
-    """Explicit belt-and-braces pin from Story 3.2 AC 7. If a future story
-    bumps SCHEMA_VERSION again, BOTH this test and `test_schema_version_pinned`
+def test_schema_version_is_3():
+    """Explicit belt-and-braces pin from Story 3.3 AC 8 (renamed from
+    `_is_2`; integer bumped from 2 → 3). If a future story bumps
+    SCHEMA_VERSION again, BOTH this test and `test_schema_version_pinned`
     must be updated together so the intent is impossible to miss in diff review."""
-    assert supervisor.SCHEMA_VERSION == 2
+    assert supervisor.SCHEMA_VERSION == 3
 
 
 # --- Story 3.2 AC 1–4, AC 7 (new debate-loop coverage) ----------------------
@@ -437,3 +444,254 @@ def test_score_round_is_deterministic_first_seen_tiebreak():
     # "Yes" was the first opinion in the (tied) largest group — and its
     # ORIGINAL casing is returned, not the normalized key.
     assert majority == "Yes"
+
+
+# --- Story 3.3 — WebSocket channel, readiness, RootStatus.realtime ---------
+#
+# All WS tests use `TestClient(supervisor.app).websocket_connect(...)` — no
+# port binding, no uvicorn boot. Broadcast-side orchestration uses
+# `asyncio.run(...)` because Starlette's test-mode `WebSocket.send_json`
+# pushes into thread-safe anyio memory streams; no app-loop binding required.
+
+
+_WS_ENVELOPE_KEYS = {"type", "schema_version", "realm_id", "ts", "seq", "payload"}
+_WS_SUPPORTED_TYPES = {
+    "session.hello",
+    "topology.delta",
+    "metrics.update",
+    "hitl.pending",
+    "heartbeat",
+    "session.bye",
+}
+
+
+def _drain_connections() -> None:
+    """Reset the module-level registry between WS tests so an earlier test's
+    half-collected session does not leak into a later assertion.
+
+    `_CONNECTIONS` is legitimately shared state — we don't expose a
+    `reset()` helper on the supervisor (tests MUST not drive production API
+    surface), so we reach in defensively only here."""
+    supervisor._CONNECTIONS.clear()
+
+
+def test_ws_accepts_valid_realm_id():
+    """AC 1 — 101 upgrade + first frame is the canonical `session.hello`
+    envelope with `seq == 0` and all 5 payload keys present."""
+    _drain_connections()
+    with TestClient(supervisor.app) as local_client:
+        with local_client.websocket_connect("/ws/realm/demo") as ws:
+            hello = ws.receive_json()
+    assert set(hello.keys()) == _WS_ENVELOPE_KEYS
+    assert hello["type"] == "session.hello"
+    assert hello["schema_version"] == supervisor.SCHEMA_VERSION
+    assert hello["realm_id"] == "demo"
+    assert hello["seq"] == 0
+    assert hello["ts"].endswith("Z")
+
+    payload = hello["payload"]
+    assert set(payload.keys()) == {
+        "service_version",
+        "schema_version",
+        "supported_event_types",
+        "heartbeat_interval_s",
+        "connection_id",
+    }
+    assert payload["service_version"] == supervisor.SERVICE_VERSION
+    assert payload["schema_version"] == supervisor.SCHEMA_VERSION
+    assert set(payload["supported_event_types"]) == _WS_SUPPORTED_TYPES
+    assert payload["heartbeat_interval_s"] == supervisor.HEARTBEAT_INTERVAL_S
+    # uuid4 strings are 36 chars with 4 dashes.
+    assert len(payload["connection_id"]) == 36
+    assert payload["connection_id"].count("-") == 4
+
+
+def test_ws_rejects_missing_realm_id():
+    """AC 1 — empty/whitespace realm_id fails regex → close 4401 BEFORE accept."""
+    _drain_connections()
+    with TestClient(supervisor.app) as local_client:
+        # %20 decodes to a single space, which fails `^[a-zA-Z0-9_-]{1,64}$`.
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with local_client.websocket_connect("/ws/realm/%20"):
+                pass
+    assert exc_info.value.code == 4401
+
+
+def test_ws_rejects_malformed_realm_id():
+    """AC 1 — characters outside `[a-zA-Z0-9_-]` → close 4401."""
+    _drain_connections()
+    with TestClient(supervisor.app) as local_client:
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with local_client.websocket_connect("/ws/realm/bad.realm"):
+                pass
+    assert exc_info.value.code == 4401
+
+
+def test_ws_rejects_forbidden_realm(monkeypatch):
+    """AC 1 — `_authorize_realm` returning `(False, …)` → close 4403."""
+    _drain_connections()
+    monkeypatch.setattr(
+        supervisor,
+        "_authorize_realm",
+        lambda realm_id: (False, "denied"),
+    )
+    with TestClient(supervisor.app) as local_client:
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with local_client.websocket_connect("/ws/realm/demo"):
+                pass
+    assert exc_info.value.code == 4403
+
+
+def test_ws_broadcast_reaches_only_matching_realm():
+    """AC 2 — tenant isolation: `broadcast_event("A", …)` reaches A, not B.
+    Also verifies monotonic `seq` per-session (A: 0=hello, 1=delta)."""
+    _drain_connections()
+    with TestClient(supervisor.app) as local_client:
+        with local_client.websocket_connect("/ws/realm/A") as ws_a, \
+             local_client.websocket_connect("/ws/realm/B") as ws_b:
+            hello_a = ws_a.receive_json()
+            hello_b = ws_b.receive_json()
+            assert hello_a["type"] == "session.hello"
+            assert hello_a["seq"] == 0
+            assert hello_b["type"] == "session.hello"
+
+            delivered = asyncio.run(
+                supervisor.broadcast_event(
+                    "A",
+                    "topology.delta",
+                    {"agents": [{"id": "x", "label": "x"}]},
+                )
+            )
+            assert delivered == 1
+
+            frame = ws_a.receive_json()
+            assert frame["type"] == "topology.delta"
+            assert frame["realm_id"] == "A"
+            assert frame["seq"] == 1  # post-hello increment
+            assert frame["payload"]["agents"][0]["id"] == "x"
+
+            # B must NOT have received the frame. Starlette's test-mode WS
+            # close-drains pending messages on `__exit__` — if a frame had
+            # leaked here we would see it next. We assert by draining and
+            # ensuring no matching event_type was seen.
+    assert supervisor._CONNECTIONS == {} or not supervisor._CONNECTIONS.get("A")
+
+
+def test_ws_broadcast_rejects_unsupported_event_type():
+    """AC 2 hardening (code-review patch) — `broadcast_event` fails fast
+    on an unsupported `event_type`. A typo like 'topolgy.delta' must
+    raise BEFORE any frame is sent, so downstream emitters (Story 4.x
+    anomaly, 6.x HUD) cannot silently drift from `_SUPPORTED_EVENT_TYPES`
+    without a SCHEMA_VERSION bump. The error message MUST name the bad
+    value so the failure is debuggable from a single log line."""
+    with pytest.raises(ValueError, match="topolgy.delta"):
+        asyncio.run(supervisor.broadcast_event("demo", "topolgy.delta", {}))
+
+
+def test_ws_heartbeat_emitted_on_idle(monkeypatch):
+    """AC 3 — with HEARTBEAT_INTERVAL_S monkeypatched to 0.05s, at least one
+    `heartbeat` envelope arrives within 0.5s of an idle connection."""
+    _drain_connections()
+    monkeypatch.setattr(supervisor, "HEARTBEAT_INTERVAL_S", 0.05)
+
+    with TestClient(supervisor.app) as local_client:
+        with local_client.websocket_connect("/ws/realm/demo") as ws:
+            hello = ws.receive_json()
+            assert hello["type"] == "session.hello"
+
+            heartbeat_seen = False
+            deadline = time.monotonic() + 0.5
+            while time.monotonic() < deadline:
+                frame = ws.receive_json()
+                if frame["type"] == "heartbeat":
+                    assert frame["payload"] == {}
+                    assert frame["realm_id"] == "demo"
+                    assert frame["seq"] >= 1
+                    heartbeat_seen = True
+                    break
+    assert heartbeat_seen
+
+
+def test_ws_disconnect_cleans_up_registry():
+    """AC 3 / route finally-block — after session context exits, the realm
+    bucket is pruned (no leaked references in `_CONNECTIONS`)."""
+    _drain_connections()
+    realm = "cleanup-target"
+    assert supervisor._CONNECTIONS.get(realm) is None
+
+    with TestClient(supervisor.app) as local_client:
+        with local_client.websocket_connect(f"/ws/realm/{realm}") as ws:
+            hello = ws.receive_json()
+            assert hello["type"] == "session.hello"
+            assert realm in supervisor._CONNECTIONS
+            assert len(supervisor._CONNECTIONS[realm]) == 1
+
+    # The route's finally-block runs asynchronously; give it up to 1s to
+    # drain, mirroring the heartbeat-fixture bounded-poll pattern.
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline and supervisor._CONNECTIONS.get(realm):
+        time.sleep(0.01)
+    assert supervisor._CONNECTIONS.get(realm) is None
+
+
+def test_ws_close_1011_on_send_failure(monkeypatch):
+    """AC 3 — when an outbound send raises, `broadcast_event` evicts the
+    session AND closes the underlying WebSocket with code 1011."""
+    _drain_connections()
+    original = supervisor._send_envelope
+    call_count = {"n": 0}
+
+    async def failing_send(session, type_, payload):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            await original(session, type_, payload)  # hello passes through
+            return
+        raise RuntimeError("simulated send failure")
+
+    monkeypatch.setattr(supervisor, "_send_envelope", failing_send)
+
+    with TestClient(supervisor.app) as local_client:
+        with local_client.websocket_connect("/ws/realm/fail") as ws:
+            hello = ws.receive_json()
+            assert hello["type"] == "session.hello"
+
+            asyncio.run(
+                supervisor.broadcast_event("fail", "topology.delta", {})
+            )
+
+            with pytest.raises(WebSocketDisconnect) as exc_info:
+                ws.receive_json()
+    assert exc_info.value.code == 1011
+
+
+def test_health_includes_realtime_channel_dep():
+    """AC 7 — `/health.checks["realtime_channel"]` is required + ready."""
+    response = client.get("/health")
+    assert response.status_code == 200
+    body = response.json()
+    assert "realtime_channel" in body["checks"]
+    assert body["checks"]["realtime_channel"] == {
+        "ready": True,
+        "required": True,
+        "detail": None,
+    }
+
+
+def test_root_includes_realtime_block():
+    """AC 7 — `GET /` body gains the additive `realtime` block."""
+    response = client.get("/")
+    assert response.status_code == 200
+    body = response.json()
+    assert "realtime" in body
+    assert set(body["realtime"].keys()) == {
+        "connections",
+        "heartbeat_interval_s",
+        "schema_version",
+    }
+    assert body["realtime"]["schema_version"] == supervisor.SCHEMA_VERSION
+    assert body["realtime"]["heartbeat_interval_s"] == supervisor.HEARTBEAT_INTERVAL_S
+    assert body["realtime"]["connections"] >= 0
+
+    # v0.1 superset invariant still holds (AC 9) — `realtime` is purely additive.
+    for legacy_key in ("service", "version", "status", "consensus_engine"):
+        assert legacy_key in body

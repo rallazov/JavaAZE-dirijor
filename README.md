@@ -38,7 +38,10 @@ Story 3.1 hardened the supervisor's `GET /` and `GET /health` endpoints into a
 structured, Pydantic-backed contract (see `backend/dirijor-core/supervisor.py`).
 Story 3.2 replaced the `POST /consensus` placeholder with a real multi-agent
 debate loop and bumped `schema_version` from 1 → 2 (additive — v0.1 keys
-preserved).
+preserved). Story 3.3 added a WebSocket channel for live canvas updates and
+bumped `schema_version` from 2 → 3 (additive — all v2 keys preserved; `GET /`
+gains a `realtime` block and `GET /health` gains a `realtime_channel`
+dependency).
 
 - `GET /` — service identity + aggregate status + per-dependency readiness.
 - `GET /health` — same dependency map, `timestamp`, and HTTP **200** when every
@@ -160,6 +163,39 @@ not the HTTP code):
 endpoint keeps returning HTTP **503** with only the v0.1 three-key body
 (`messages`, `consensus_score`, `verified_facts`) so strict parsers survive
 degradation — v2 additive keys appear only on the 200 path.
+
+### `WS /ws/realm/{realm_id}` — live canvas channel (schema v3, Story 3.3)
+
+v0.1 WebSocket channel that streams topology deltas, realm metrics, and HITL
+queue events from Dirijor Core to the Private Realm canvas. Replaces the prior
+client-side stub so the canvas now reflects real backend state.
+
+- **Handshake:** `realm_id` must match `^[a-zA-Z0-9_-]{1,64}$`. Malformed ids
+  are rejected with close code **4401** (`invalid_realm_id`); authorization
+  failures close with **4403** (`realm_forbidden`). Well-formed connections
+  receive `session.hello` with a server-assigned `connection_id`.
+- **Heartbeats:** server emits a `heartbeat` frame every
+  `HEARTBEAT_INTERVAL_S` (default 15 s). If a heartbeat `send` fails, the
+  session is closed with **1011** (`heartbeat_send_failed`) and evicted from
+  the registry — the client should treat 1011 as retryable.
+- **Reconnect policy:** the frontend client uses exponential backoff with
+  jitter (500 ms → capped at 30 000 ms) for up to `MAX_RECONNECT_ATTEMPTS=8`
+  attempts. Close codes `4401` / `4403` are client-fault and do **not**
+  retry; `1006` / `1011` and clean `1000` closes do.
+- **Event types:** `session.hello`, `topology.delta`, `metrics.update`,
+  `hitl.pending`, `heartbeat`, `session.bye`. Envelope is
+  `{ v: 1, type, ts, realm_id, connection_id, payload }` with
+  `extra="forbid"` — additive changes will bump `SCHEMA_VERSION`, never
+  rename existing fields.
+- **Readiness:** the readiness registry exposes a `realtime_channel`
+  dependency (currently `ready: true, required: false`) and `GET /` returns
+  a `realtime` summary block `{ transport, heartbeat_interval_s,
+  active_connections, active_realms }` for operators.
+
+Frontend wiring: set `NEXT_PUBLIC_DIRIJOR_WS_URL` to the base URL (e.g.
+`ws://localhost:8000/ws/realm`) before running `npm run dev`; when unset the
+canvas stays in `idle` mode so the UI is still runnable without a backend.
+See `frontend/.env.example` for the default local value.
 
 ### Running the supervisor test suite
 

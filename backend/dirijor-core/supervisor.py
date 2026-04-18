@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
 # Dirijor Supervisor – LangGraph Multi-Agent Consensus Brain
 #
-# Contract / schema discipline (Story 3.1 + Story 3.2):
+# Contract / schema discipline (Story 3.1 + Story 3.2 + Story 3.3):
 #   - SERVICE_VERSION and SCHEMA_VERSION are the single source of truth; both
 #     `/` and `/health` read them.
 #   - SCHEMA_VERSION bump rules: MINOR-style bump (e.g. 1 -> 2) ONLY on
@@ -27,19 +27,32 @@
 #     returns exactly the v0.1 three-key body so strict parsers survive a
 #     compile-failure degradation (Story 3.1 code-review lesson; regression
 #     guarded by `test_consensus_degraded_keeps_v01_key_set`).
+#   v3 (Story 3.3, 2026-04-17) — Additive on `GET /` + `GET /health` +
+#     introduces the WebSocket surface. New: `realtime_channel` dependency
+#     entry in `checks` / `dependencies`; new `realtime` block on `RootStatus`
+#     (`connections`, `heartbeat_interval_s`, `schema_version`); new
+#     `/ws/realm/{realm_id}` WebSocket endpoint with the canonical 6-key
+#     envelope (`type`, `schema_version`, `realm_id`, `ts`, `seq`, `payload`).
+#     No 3.1 / 3.2 HTTP keys removed or renamed. Envelope keys are STRICT
+#     (6 exactly); payload shapes inside each `type` are additive-only. WS
+#     close-code contract: 4401 invalid_realm_id, 4403 realm_forbidden,
+#     1011 internal/heartbeat-send-failed.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 import time
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Callable, TypedDict
+from typing import Any, Callable, TypedDict
 
-from fastapi import Body, FastAPI
+from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from langgraph.graph import END, StateGraph
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger("dirijor.supervisor")
 
@@ -47,7 +60,7 @@ logger = logging.getLogger("dirijor.supervisor")
 
 SERVICE_NAME = "dirijor-supervisor"
 SERVICE_VERSION = "0.1.0"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 STARTED_AT = time.monotonic()
 STARTUP_GRACE_S = 1.0
 
@@ -55,6 +68,30 @@ STARTUP_GRACE_S = 1.0
 # Per-request overrides come through the JSON body only (no env vars).
 DEFAULT_THRESHOLD = 0.95
 DEFAULT_MAX_ROUNDS = 3
+
+# --- Realtime (Story 3.3) constants ------------------------------------------
+#
+# HEARTBEAT_INTERVAL_S is the server-controlled tick. The client reads it off
+# the `session.hello` payload and uses `2 * HEARTBEAT_INTERVAL_S` as its
+# inactivity reconnect trigger — keep this a module-level constant so tests
+# can monkeypatch it down to sub-second values for deterministic coverage.
+HEARTBEAT_INTERVAL_S = 15.0
+
+# Realm-id grammar — locked on the URL shape. Singular `realm`, path-param
+# only. Mirror this regex in any future auth or admin tooling — do not relax.
+_REALM_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+# Canonical enum of event types. Extending this enum requires a SCHEMA_VERSION
+# bump + extending `supported_event_types` on the session.hello payload so
+# clients can gate new types behind feature detection.
+_SUPPORTED_EVENT_TYPES: tuple[str, ...] = (
+    "session.hello",
+    "topology.delta",
+    "metrics.update",
+    "hitl.pending",
+    "heartbeat",
+    "session.bye",
+)
 
 
 # --- Pydantic models: consensus request/response ----------------------------
@@ -316,13 +353,21 @@ def _probe_mesh() -> tuple[bool, str | None]:
     return False, "planned — see Story 5.1"
 
 
-# Story 3.2 AC 8: REGISTRY is intentionally unchanged. The debate-loop readiness
-# still rides on `graph_compiled` / `consensus_engine`; a separate
-# `debate_loop_ready` entry would arrive with real external agents in a future
-# story and is explicitly out of scope here.
+def _probe_realtime_channel() -> tuple[bool, str | None]:
+    # Story 3.3 v0.1 probe: the WebSocket route is registered at import time,
+    # so if this module imported cleanly the channel is structurally ready.
+    # Story 6.1 (OTel) will expand this into an active-connection health read.
+    return True, None
+
+
+# Story 3.2 AC 8: REGISTRY consensus wiring is intentionally unchanged — the
+# debate-loop readiness still rides on `graph_compiled` / `consensus_engine`.
+# Story 3.3 AC 7: `realtime_channel` added between `consensus_engine` and
+# `semantic_cache` so operators see Canvas wiring before future-state deps.
 REGISTRY: list[DependencyCheck] = [
     DependencyCheck("graph_compiled", True, _probe_graph_compiled),
     DependencyCheck("consensus_engine", True, _probe_graph_compiled),
+    DependencyCheck("realtime_channel", True, _probe_realtime_channel),
     DependencyCheck("semantic_cache", False, _probe_semantic_cache),
     DependencyCheck("mesh", False, _probe_mesh),
 ]
@@ -382,12 +427,34 @@ class DependencyStatus(BaseModel):
     detail: str | None = None
 
 
+class RealtimeSummary(BaseModel):
+    """Realtime (WebSocket) surface summary on `GET /` (Story 3.3, schema v3).
+
+    Additive to `RootStatus` — `service`, `version`, `status`, `consensus_engine`
+    from v0.1 remain present. Introduced so operators can see at-a-glance how
+    many canvas sessions are live without opening a dashboard.
+    """
+
+    connections: int = Field(
+        ge=0,
+        description="Sum of open sessions across all realms (in-process only).",
+    )
+    heartbeat_interval_s: float = Field(
+        gt=0.0,
+        description="Server-controlled heartbeat cadence (seconds).",
+    )
+    schema_version: int = Field(
+        description="Echo of SCHEMA_VERSION so clients can cross-check envelopes."
+    )
+
+
 class RootStatus(BaseModel):
     """`GET /` response model.
 
     v0.1 superset rule: `service`, `version`, `status`, `consensus_engine`
     MUST remain present and compatible so docker-compose / README /
-    agent-wrapper callers do not regress (AC 4).
+    agent-wrapper callers do not regress (AC 4). Story 3.3 adds the
+    `realtime` block under SCHEMA_VERSION=3 as a pure additive field.
     """
 
     service: str
@@ -401,6 +468,9 @@ class RootStatus(BaseModel):
     )
     uptime_s: float
     dependencies: dict[str, DependencyStatus]
+    realtime: RealtimeSummary = Field(
+        description="Story 3.3 additive — WebSocket channel summary.",
+    )
 
 
 class HealthStatus(BaseModel):
@@ -443,6 +513,11 @@ def root() -> RootStatus:
         consensus_engine=_consensus_engine_label(),
         uptime_s=uptime,
         dependencies={name: DependencyStatus(**entry) for name, entry in checks.items()},
+        realtime=RealtimeSummary(
+            connections=sum(len(bucket) for bucket in _CONNECTIONS.values()),
+            heartbeat_interval_s=HEARTBEAT_INTERVAL_S,
+            schema_version=SCHEMA_VERSION,
+        ),
     )
 
 
@@ -638,3 +713,290 @@ def run_consensus(
     )
 
     return payload
+
+
+# --- Realtime WebSocket channel (Story 3.3) ----------------------------------
+#
+# Canvas ↔ Core real-time transport. v0.1 is ONE-WAY Core → Canvas; client →
+# Core commands remain HTTP POST (Story 2.1 spin, Story 4.x HITL approvals).
+# The envelope is strict-6-keys; payloads are additive per-type. Event types
+# live in `_SUPPORTED_EVENT_TYPES` (module top) — adding a new type requires
+# a SCHEMA_VERSION bump in a future story and an additive entry in the
+# `session.hello` payload so clients can gate on feature detection.
+#
+# `broadcast_event` is the SOLE public emit API. Do not touch `_CONNECTIONS`
+# directly from future stories (4.x anomaly, 5.x runtime, 6.x observability)
+# — all outbound frames MUST go through the shared envelope / error path so
+# logging, eviction, and `seq` monotonicity stay consistent.
+#
+# TODO(refactor): split realtime section into realtime.py when supervisor.py
+# grows past ~700 lines (Story 4.2 will likely push us there).
+
+
+class RealtimeEnvelope(BaseModel):
+    """Canonical WebSocket frame — 6 strict keys, additive payloads.
+
+    All outbound WS frames are shaped through `_send_envelope`, which fills
+    these keys and then emits as JSON via `WebSocket.send_json`. The enum of
+    `type` values is `_SUPPORTED_EVENT_TYPES` — extending requires a major
+    SCHEMA_VERSION coordination with the frontend `DirijorRealtimeEvent`
+    discriminated union.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    schema_version: int
+    realm_id: str
+    ts: str
+    seq: int = Field(ge=0)
+    payload: dict[str, Any]
+
+
+@dataclass(eq=False)
+class _WsSession:
+    """One live WebSocket session bound to a realm.
+
+    `eq=False` keeps the default identity-based `__hash__`, so instances are
+    set-member-safe even though we mutate `seq` and `heartbeat_task`.
+    """
+
+    realm_id: str
+    connection_id: str
+    ws: WebSocket
+    seq: int = 0
+    heartbeat_task: asyncio.Task | None = field(default=None)
+
+
+# In-process connection registry. `_CONNECTIONS` is intentionally module-level
+# so `root()` and `broadcast_event` share the same view. Multi-worker scale-out
+# (K8s replicas, cloud deployment) will require Redis Pub/Sub or NATS — flagged
+# as a documented follow-up, NOT a pre-introduced dependency.
+_CONNECTIONS: dict[str, set[_WsSession]] = {}
+
+
+def _authorize_realm(realm_id: str) -> tuple[bool, str | None]:
+    """Realm authorization hook — v0.1 no-op, Story 5.1 extension point.
+
+    Returns `(ok, reason)`. `ok == False` → handshake is rejected with WS
+    close code 4403. Story 5.1 (mesh identity) will replace the body with a
+    real auth check (Headscale/Tailscale or a scoped WS token from spin).
+    Keeping this stub as a named function keeps the route body stable.
+    """
+
+    return True, None
+
+
+def _ws_timestamp() -> str:
+    """ISO-8601 UTC timestamp with trailing `Z` (matches `/health.timestamp`)."""
+
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+async def _send_envelope(
+    session: _WsSession, type_: str, payload: dict[str, Any]
+) -> None:
+    """Emit a single canonical envelope to a session and advance its `seq`.
+
+    `seq` is monotonic per-session starting at 0 (session.hello). `seq`
+    increment happens AFTER a successful `send_json` so a failed send does
+    not leak a gap into the numbering visible to other sessions. The
+    caller is responsible for catching and handling send failures — this
+    function intentionally does not swallow exceptions so `broadcast_event`
+    can evict dead sessions and `_heartbeat_loop` can switch to 1011 close.
+    """
+
+    envelope = {
+        "type": type_,
+        "schema_version": SCHEMA_VERSION,
+        "realm_id": session.realm_id,
+        "ts": _ws_timestamp(),
+        "seq": session.seq,
+        "payload": payload,
+    }
+    await session.ws.send_json(envelope)
+    session.seq += 1
+
+
+async def broadcast_event(
+    realm_id: str, event_type: str, payload: dict[str, Any]
+) -> int:
+    """Fan out a single event to every session bound to `realm_id`.
+
+    Returns the count of successful deliveries. Per-session exceptions are
+    logged at WARNING and the dead session is evicted inline — no separate
+    sweeper task. Sessions on *other* realms never see the frame (tenant
+    isolation invariant — regression-guarded by
+    `test_ws_broadcast_reaches_only_matching_realm`).
+
+    This is the ONLY public emit surface Story 3.3 ships. Downstream stories
+    (4.2 anomaly / 4.3 audit / 6.3 canvas HUD) plug into it — they MUST NOT
+    touch `_CONNECTIONS` directly.
+
+    Story 3.3 code-review patch (AC 2 hardening): fail fast on unknown
+    `event_type`. `RealtimeEnvelope` has `ConfigDict(extra="forbid")` on
+    keys but not on the `type` value, so without this guard a typo like
+    ``"topolgy.delta"`` (missing 'o') would silently emit a non-contract
+    frame to every subscriber. Raising `ValueError` at the call site is the
+    cheapest, loudest signal — the caller (typically a future Story 4.x /
+    6.x emitter) crashes its own code path instead of poisoning the WS
+    contract for canvas clients. Adding a new event type is a two-step,
+    schema-bumping change: extend `_SUPPORTED_EVENT_TYPES`, then bump
+    `SCHEMA_VERSION` + document the new payload in
+    `docs/reference/supervisor-api.md`.
+    """
+
+    if event_type not in _SUPPORTED_EVENT_TYPES:
+        raise ValueError(
+            f"broadcast_event: unsupported event_type={event_type!r}; "
+            f"must be one of {_SUPPORTED_EVENT_TYPES}"
+        )
+
+    # TODO(6.1): wrap this function in an OTel span once Story 6.1 lands.
+    delivered = 0
+    dead: list[_WsSession] = []
+    for session in list(_CONNECTIONS.get(realm_id, set())):
+        try:
+            await _send_envelope(session, event_type, payload)
+            delivered += 1
+        except Exception as exc:  # pragma: no cover — exercised by test_ws_close_1011
+            logger.warning(
+                "ws.broadcast.drop realm=%s conn=%s err=%s",
+                realm_id,
+                session.connection_id,
+                exc,
+            )
+            dead.append(session)
+    for session in dead:
+        bucket = _CONNECTIONS.get(realm_id)
+        if bucket is not None:
+            bucket.discard(session)
+            if not bucket:
+                _CONNECTIONS.pop(realm_id, None)
+        try:
+            await session.ws.close(code=1011, reason="broadcast_send_failed")
+        except Exception:  # pragma: no cover
+            pass
+    return delivered
+
+
+async def _heartbeat_loop(session: _WsSession) -> None:
+    """Per-session heartbeat scheduler.
+
+    Sleeps `HEARTBEAT_INTERVAL_S` seconds, emits an empty `heartbeat`
+    envelope, repeat. Cancelling this task is how the route's `finally`
+    block shuts the heartbeat down cleanly (no leaked task). If the send
+    fails (half-open socket, client gone), the session is closed with
+    WS code 1011 so clients can distinguish server-side cleanup (1011)
+    from client-initiated unload (1001) — see AC 3.
+    """
+
+    try:
+        while True:
+            await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+            await _send_envelope(session, "heartbeat", {})
+    except asyncio.CancelledError:
+        # Normal cleanup path — re-raise so the task is marked cancelled.
+        raise
+    except Exception as exc:  # pragma: no cover — exercised by test_ws_close_1011
+        logger.warning(
+            "ws.heartbeat.failed conn=%s err=%s", session.connection_id, exc
+        )
+        try:
+            await session.ws.close(code=1011, reason="heartbeat_send_failed")
+        except Exception:
+            pass
+
+
+@app.websocket("/ws/realm/{realm_id}")
+async def realm_ws(websocket: WebSocket, realm_id: str) -> None:
+    """Canvas ↔ Core real-time channel (Story 3.3, schema v3).
+
+    URL: `/ws/realm/{realm_id}` — singular `realm`, path-param, NO query
+    string. Reject codes (close BEFORE accept):
+      - 4401 `invalid_realm_id` — regex fail (`^[a-zA-Z0-9_-]{1,64}$`).
+      - 4403 `realm_forbidden`  — `_authorize_realm` returned `(False, …)`.
+    Post-accept lifecycle:
+      1. Register session in `_CONNECTIONS[realm_id]`.
+      2. Emit `session.hello` (seq=0) with handshake payload.
+      3. Spawn heartbeat task (15s cadence).
+      4. Loop `receive_text` (discard — v0.1 is one-way).
+      5. On disconnect/exception: cancel heartbeat, evict, prune bucket,
+         log `ws.session.close`.
+    """
+
+    if not _REALM_ID_RE.match(realm_id or ""):
+        await websocket.close(code=4401, reason="invalid_realm_id")
+        return
+
+    ok, _reason = _authorize_realm(realm_id)
+    if not ok:
+        await websocket.close(code=4403, reason="realm_forbidden")
+        return
+
+    await websocket.accept()
+    session = _WsSession(
+        realm_id=realm_id,
+        connection_id=str(uuid.uuid4()),
+        ws=websocket,
+    )
+    _CONNECTIONS.setdefault(realm_id, set()).add(session)
+    logger.info(
+        "ws.session.open",
+        extra={
+            "event": "ws.session.open",
+            "realm_id": realm_id,
+            "connection_id": session.connection_id,
+            "conn_count": len(_CONNECTIONS[realm_id]),
+        },
+    )
+
+    started = time.monotonic()
+    close_code: int | None = None
+    try:
+        await _send_envelope(
+            session,
+            "session.hello",
+            {
+                "service_version": SERVICE_VERSION,
+                "schema_version": SCHEMA_VERSION,
+                "supported_event_types": list(_SUPPORTED_EVENT_TYPES),
+                "heartbeat_interval_s": HEARTBEAT_INTERVAL_S,
+                "connection_id": session.connection_id,
+            },
+        )
+        session.heartbeat_task = asyncio.create_task(_heartbeat_loop(session))
+        while True:
+            # v0.1 is Core → Canvas only. Canvas → Core commands remain HTTP
+            # POST (Story 2.1 spin, Story 4.x HITL). We receive_text to keep
+            # the connection draining but intentionally discard the payload.
+            await websocket.receive_text()
+    except WebSocketDisconnect as disc:
+        close_code = disc.code
+    except Exception:  # pragma: no cover - defensive against unexpected failures
+        logger.exception(
+            "ws.session.crashed conn=%s", session.connection_id
+        )
+    finally:
+        if session.heartbeat_task and not session.heartbeat_task.done():
+            session.heartbeat_task.cancel()
+            try:
+                await session.heartbeat_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        bucket = _CONNECTIONS.get(realm_id)
+        if bucket is not None:
+            bucket.discard(session)
+            if not bucket:
+                _CONNECTIONS.pop(realm_id, None)
+        logger.info(
+            "ws.session.close",
+            extra={
+                "event": "ws.session.close",
+                "realm_id": realm_id,
+                "connection_id": session.connection_id,
+                "close_code": close_code,
+                "seq_last": session.seq,
+                "duration_s": round(time.monotonic() - started, 3),
+            },
+        )
