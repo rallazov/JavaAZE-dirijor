@@ -27,10 +27,16 @@ max_cache_age = "1d"
 # Validate mailto:, http(s):, and file:// links. Skip tel:, data:, etc.
 scheme = ["https", "http", "mailto"]
 
-# Resolve relative links from the repo root, not the markdown file's directory.
-# NOTE: lychee renamed `base` → `base_url` in v0.23 (the key `base` now
-# fails with "unknown field"). Keep this as `base_url` going forward.
-base_url = "."
+# NOTE: lychee renamed `base` → `base_url` in v0.23 AND tightened validation:
+# `base_url` must be an absolute URL (with scheme) OR an absolute local
+# path — relative values like "." now fail with "Base must either be a
+# URL (with scheme) or an absolute local path". We intentionally omit
+# `base_url` here: this job checks EXTERNAL URL health (the `mkdocs
+# build --strict` job in the same workflow already validates internal
+# links), so relative-link resolution from the repo root is not needed.
+# If we later add root-relative links in markdown that lychee needs to
+# resolve, add `root_dir = "/github/workspace"` (the lychee-action
+# mount) instead of re-introducing a relative `base_url`.
 
 # Private/local/placeholder hosts we don't want to probe from CI.
 exclude = [
