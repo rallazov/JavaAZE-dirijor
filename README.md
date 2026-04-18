@@ -36,12 +36,17 @@ mkdocs serve     # http://127.0.0.1:8000
 
 Story 3.1 hardened the supervisor's `GET /` and `GET /health` endpoints into a
 structured, Pydantic-backed contract (see `backend/dirijor-core/supervisor.py`).
+Story 3.2 replaced the `POST /consensus` placeholder with a real multi-agent
+debate loop and bumped `schema_version` from 1 → 2 (additive — v0.1 keys
+preserved).
 
 - `GET /` — service identity + aggregate status + per-dependency readiness.
 - `GET /health` — same dependency map, `timestamp`, and HTTP **200** when every
   `required: true` dependency is ready; **HTTP 503** (same body shape) when any
   required dependency is not ready.
-- `POST /consensus` — unchanged v0.1 placeholder (real debate loop lands in Story 3.2).
+- `POST /consensus` — real debate loop (configurable rounds + quorum threshold,
+  per-round votes, explicit `termination_reason`, safe no-decision path). See
+  the section below for the request/response contract.
 - The Docker image ships a `HEALTHCHECK` that calls `GET /health`, so
   docker / compose / K8s pick up degraded state automatically.
 
@@ -51,7 +56,7 @@ structured, Pydantic-backed contract (see `backend/dirijor-core/supervisor.py`).
 {
   "service": "dirijor-supervisor",
   "version": "0.1.0",
-  "schema_version": 1,
+  "schema_version": 2,
   "status": "operational",
   "consensus_engine": "ready",
   "uptime_s": 12.4,
@@ -70,7 +75,7 @@ structured, Pydantic-backed contract (see `backend/dirijor-core/supervisor.py`).
 {
   "status": "ok",
   "version": "0.1.0",
-  "schema_version": 1,
+  "schema_version": 2,
   "uptime_s": 12.4,
   "timestamp": "2026-04-16T10:12:44.117Z",
   "checks": {
@@ -81,6 +86,80 @@ structured, Pydantic-backed contract (see `backend/dirijor-core/supervisor.py`).
   }
 }
 ```
+
+### `POST /consensus` — debate loop contract (schema v2)
+
+All request fields are optional. Defaults: `max_rounds=3`, `threshold=0.95`
+(PRD: ≥95% agreement on high-stakes outputs). An empty body or a bare
+`?query=foo` query-string are both valid. The response's `messages` field
+mirrors the request: it is `[query]` when a query is supplied and `[]`
+otherwise — both response samples below assume the request in the first
+code block, so the same `"Is the staging DB patched?"` surfaces on both
+the threshold-reached and no-decision paths.
+
+Request body:
+
+```json
+{
+  "query": "Is the staging DB patched?",
+  "opinions": [
+    { "agent_id": "grok",   "opinion": "yes", "confidence": 0.9 },
+    { "agent_id": "harper", "opinion": "yes", "confidence": 0.95 },
+    { "agent_id": "claude", "opinion": "yes", "confidence": 0.99 }
+  ],
+  "max_rounds": 3,
+  "threshold": 0.95
+}
+```
+
+Response — threshold reached (HTTP 200):
+
+```json
+{
+  "messages": ["Is the staging DB patched?"],
+  "consensus_score": 1.0,
+  "verified_facts": [],
+  "decision": "yes",
+  "votes": [
+    { "agent_id": "grok",   "opinion": "yes", "confidence": 0.9,  "round": 1 },
+    { "agent_id": "harper", "opinion": "yes", "confidence": 0.95, "round": 1 },
+    { "agent_id": "claude", "opinion": "yes", "confidence": 0.99, "round": 1 }
+  ],
+  "termination_reason": "threshold_reached",
+  "rounds": 1,
+  "threshold": 0.95
+}
+```
+
+Response — no decision after max rounds (still HTTP 200; `decision: null`
+is a normal outcome, not an error — callers check `decision` / `termination_reason`,
+not the HTTP code):
+
+```json
+{
+  "messages": ["Is the staging DB patched?"],
+  "consensus_score": 0.3333,
+  "verified_facts": [],
+  "decision": null,
+  "votes": [
+    { "agent_id": "a", "opinion": "yes",   "confidence": 1.0, "round": 1 },
+    { "agent_id": "b", "opinion": "no",    "confidence": 1.0, "round": 1 },
+    { "agent_id": "c", "opinion": "maybe", "confidence": 1.0, "round": 1 },
+    { "agent_id": "a", "opinion": "yes",   "confidence": 1.0, "round": 2 },
+    { "agent_id": "b", "opinion": "no",    "confidence": 1.0, "round": 2 },
+    { "agent_id": "c", "opinion": "maybe", "confidence": 1.0, "round": 2 }
+  ],
+  "termination_reason": "max_rounds_exhausted",
+  "rounds": 2,
+  "threshold": 0.95
+}
+```
+
+`termination_reason` is one of: `threshold_reached`, `max_rounds_exhausted`,
+`single_opinion_shortcut`, `no_opinions`. On LangGraph compile failure the
+endpoint keeps returning HTTP **503** with only the v0.1 three-key body
+(`messages`, `consensus_score`, `verified_facts`) so strict parsers survive
+degradation — v2 additive keys appear only on the 200 path.
 
 ### Running the supervisor test suite
 
