@@ -15,6 +15,12 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 import type { AgentNodeData } from '@/types/agent';
 import type { RealmNode } from '@/types/canvas';
 import type { CriticalAction, RealmMetrics } from '@/types/realm';
+import type {
+  DirijorRealtimeStatus,
+  HitlPendingPayload,
+  MetricsUpdatePayload,
+  TopologyDeltaPayload,
+} from '@/types/realtime';
 
 /** Logical bounds for the “vault” graph — keeps drag/pan inside a defined realm. */
 export const REALM_NODE_EXTENT: [[number, number], [number, number]] = [
@@ -123,6 +129,10 @@ interface CanvasStore {
   inspectorFocusReturn: 'toolbar' | 'fab';
   /** Active realm for realtime + toolbar (stub multi-realm; not persisted). */
   activeRealmId: string;
+  /** Story 3.3 — current transport status mirrored from `useDirijorRealtime`
+   *  so any component can render a label without re-running the hook.
+   *  Not persisted (rebuilt on mount by the hook). */
+  realtimeStatus: DirijorRealtimeStatus;
   setRealmDescription: (v: string) => void;
   setActiveRealmId: (id: string) => void;
   setInspectorOpen: (open: boolean, focusFrom?: 'toolbar' | 'fab') => void;
@@ -134,6 +144,20 @@ interface CanvasStore {
   removePending: (id: string) => void;
   /** Resets graph, metrics, HITL queue, and realm description to the bundled demo (also used on bad rehydrate). */
   resetGraphToDemo: () => void;
+  /** Story 3.3 AC 4 — upsert/tombstone agents + edges from a topology.delta
+   *  frame. Unknown ids are appended; `_tombstone: true` removes by id. */
+  applyTopologyDelta: (payload: TopologyDeltaPayload) => void;
+  /** Story 3.3 AC 4 — shallow merge into `metrics`. IMPORTANT: if
+   *  `auditPreview` is present on the payload it REPLACES the existing
+   *  array wholesale. Shallow-merging an array is ambiguous (per-index vs
+   *  concat), so we deliberately do not. */
+  applyMetricsUpdate: (payload: MetricsUpdatePayload) => void;
+  /** Story 3.3 AC 4 — dedup by `action.id`. Existing id → in-place update;
+   *  new id → append to the pending queue. */
+  applyHitlPending: (payload: HitlPendingPayload) => void;
+  /** Story 3.3 — called by `useDirijorRealtime` on every transport status
+   *  transition. Consumed by `StatusBar`. */
+  setRealtimeStatus: (status: DirijorRealtimeStatus) => void;
 }
 
 type PersistedCanvasSlice = Pick<CanvasStore, 'nodes' | 'edges' | 'realmDescription'>;
@@ -186,8 +210,10 @@ export const useCanvasStore = create<CanvasStore>()(
       inspectorOpen: true,
       inspectorFocusReturn: 'toolbar',
       activeRealmId: 'local',
+      realtimeStatus: 'idle',
       setRealmDescription: (realmDescription) => set({ realmDescription }),
       setActiveRealmId: (activeRealmId) => set({ activeRealmId }),
+      setRealtimeStatus: (realtimeStatus) => set({ realtimeStatus }),
       setInspectorOpen: (open, focusFrom = 'toolbar') =>
         set((s) =>
           open
@@ -213,6 +239,109 @@ export const useCanvasStore = create<CanvasStore>()(
           metrics: initialMetrics,
           pendingActions: initialPending,
           inspectorFocusReturn: 'toolbar',
+        }),
+      applyTopologyDelta: (payload) =>
+        set((state) => {
+          let nextNodes = state.nodes;
+          let nextEdges = state.edges;
+
+          if (payload.agents && payload.agents.length > 0) {
+            const nodeIndex = new Map(state.nodes.map((n, i) => [n.id, i] as const));
+            nextNodes = state.nodes.slice();
+            for (const a of payload.agents) {
+              if (!a.id) continue;
+              if (a._tombstone) {
+                const idx = nodeIndex.get(a.id);
+                if (idx !== undefined) {
+                  nextNodes.splice(idx, 1);
+                  // Rebuild the index because positions shifted.
+                  nodeIndex.clear();
+                  nextNodes.forEach((n, i) => nodeIndex.set(n.id, i));
+                }
+                continue;
+              }
+              const idx = nodeIndex.get(a.id);
+              const { id: _skipId, _tombstone: _skipT, ...dataPatch } = a;
+              void _skipId;
+              void _skipT;
+              if (idx !== undefined) {
+                const existing = nextNodes[idx];
+                nextNodes[idx] = {
+                  ...existing,
+                  data: { ...existing.data, ...(dataPatch as Partial<AgentNodeData>) },
+                };
+              } else {
+                // New node arriving from the backend. Position is not
+                // authoritative from the backend; seed at origin so React
+                // Flow still lays it out (future stories may add layout
+                // hints via a dedicated event type).
+                nextNodes.push({
+                  id: a.id,
+                  type: 'agent',
+                  position: { x: 0, y: 0 },
+                  data: {
+                    label: a.id,
+                    role: 'custom',
+                    safetyScore: 0,
+                    status: 'pending',
+                    ...(dataPatch as Partial<AgentNodeData>),
+                  } as AgentNodeData,
+                });
+                nodeIndex.set(a.id, nextNodes.length - 1);
+              }
+            }
+          }
+
+          if (payload.edges && payload.edges.length > 0) {
+            const edgeIndex = new Map(state.edges.map((e, i) => [e.id, i] as const));
+            nextEdges = state.edges.slice();
+            for (const e of payload.edges) {
+              if (!e.id) continue;
+              if (e._tombstone) {
+                const idx = edgeIndex.get(e.id);
+                if (idx !== undefined) {
+                  nextEdges.splice(idx, 1);
+                  edgeIndex.clear();
+                  nextEdges.forEach((x, i) => edgeIndex.set(x.id, i));
+                }
+                continue;
+              }
+              const idx = edgeIndex.get(e.id);
+              if (idx !== undefined) {
+                nextEdges[idx] = {
+                  ...nextEdges[idx],
+                  ...(e.source !== undefined ? { source: e.source } : {}),
+                  ...(e.target !== undefined ? { target: e.target } : {}),
+                };
+              } else if (e.source && e.target) {
+                nextEdges.push({
+                  id: e.id,
+                  source: e.source,
+                  target: e.target,
+                  type: 'encrypted',
+                });
+                edgeIndex.set(e.id, nextEdges.length - 1);
+              }
+            }
+          }
+
+          if (nextNodes === state.nodes && nextEdges === state.edges) return state;
+          return { nodes: nextNodes, edges: nextEdges };
+        }),
+      applyMetricsUpdate: (payload) =>
+        set((state) => ({
+          metrics: { ...state.metrics, ...payload },
+        })),
+      applyHitlPending: (payload) =>
+        set((state) => {
+          const next = state.pendingActions.slice();
+          const idx = next.findIndex((p) => p.id === payload.action.id);
+          if (idx >= 0) {
+            next[idx] = { ...next[idx], ...payload.action };
+          } else {
+            next.push(payload.action);
+          }
+          return { pendingActions: next };
         }),
     }),
     {

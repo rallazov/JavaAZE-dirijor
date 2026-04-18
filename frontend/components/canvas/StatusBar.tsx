@@ -5,10 +5,35 @@ import { Radio } from 'lucide-react';
 import { useAgentComms } from '@/hooks/useAgentComms';
 import { useCanvasStore } from '@/store/canvas-store';
 import { cn } from '@/lib/utils';
+import type { DirijorRealtimeStatus } from '@/types/realtime';
+
+/** Story 3.3 AC 4 — transport label mapping. Kept as a pure function so we
+ *  can unit-test it later if the label text changes. */
+function realtimeLabel(status: DirijorRealtimeStatus): string {
+  switch (status) {
+    case 'connected':
+      return 'Live';
+    case 'connecting':
+      return 'Connecting…';
+    case 'reconnecting':
+      return 'Reconnecting…';
+    case 'error':
+      return 'Disconnected';
+    case 'idle':
+    default:
+      return 'Idle (set NEXT_PUBLIC_DIRIJOR_WS_URL)';
+  }
+}
 
 export function StatusBar({ className }: { className?: string }) {
   const metrics = useCanvasStore((s) => s.metrics);
-  const { state: comms } = useAgentComms({});
+  const realtimeStatus = useCanvasStore((s) => s.realtimeStatus);
+  // Story 3.3 AC 4 — `useAgentComms` is a separate (pre-3.3) transport stub
+  // that will be cleaned up in a future story. We keep reading it so its
+  // behavior stays observable, but the primary label now reflects the real
+  // Dirijor Core WebSocket status.
+  const { state: _legacyComms } = useAgentComms({});
+  void _legacyComms;
 
   return (
     <footer
@@ -23,7 +48,7 @@ export function StatusBar({ className }: { className?: string }) {
       <span className="flex items-center gap-2 font-mono text-realm-muted">
         <Radio className="size-3.5 text-realm-cyan" aria-hidden />
         Transport
-        <span className="text-zinc-200">{comms === 'live' ? 'Live stub' : 'Idle (set WSS URL)'}</span>
+        <span className="text-zinc-200">{realtimeLabel(realtimeStatus)}</span>
       </span>
       <span className="font-mono text-realm-muted">
         Median RTT{' '}

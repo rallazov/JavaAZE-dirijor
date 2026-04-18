@@ -20,6 +20,7 @@ import { StatusBar } from '@/components/canvas/StatusBar';
 import { Button } from '@/components/ui/button';
 import { RealmToastProvider } from '@/components/ui/realm-toast';
 import { useDirijorRealtime } from '@/hooks/useDirijorRealtime';
+import { resolveDirijorWsUrl } from '@/lib/dirijor-realtime';
 import { scoreToMinimapColor } from '@/lib/safety-visual';
 import { useCanvasStore, REALM_NODE_EXTENT, REALM_TRANSLATE_EXTENT } from '@/store/canvas-store';
 import type { AgentNodeData } from '@/types/agent';
@@ -50,8 +51,15 @@ function CanvasShellInner() {
   const setInspectorOpen = useCanvasStore((s) => s.setInspectorOpen);
   const activeRealmId = useCanvasStore((s) => s.activeRealmId);
 
-  /** Epic 3 — pass url when Core assigns a realm session */
-  useDirijorRealtime({ url: undefined, realmId: activeRealmId });
+  /** Story 3.3 — live WebSocket transport. `NEXT_PUBLIC_DIRIJOR_WS_URL`
+   *  is the ONLY env-var read site; all other callers flow through
+   *  `resolveDirijorWsUrl` / `buildWsUrl` (see `lib/dirijor-realtime.ts`).
+   *  When the env var is unset, the hook stays `idle` so the demo canvas
+   *  keeps rendering in `npm run dev` without a backend (AC 5). */
+  useDirijorRealtime({
+    url: resolveDirijorWsUrl(process.env.NEXT_PUBLIC_DIRIJOR_WS_URL),
+    realmId: activeRealmId,
+  });
 
   const [live, setLive] = useState('');
 
