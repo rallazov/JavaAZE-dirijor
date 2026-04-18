@@ -13,7 +13,7 @@ timeout = 20
 max_concurrency = 8
 
 # Pretend to be a browser — some hosts 403 the default lychee user-agent.
-user_agent = "Mozilla/5.0 (compatible; lychee/0.15; +https://lychee.cli.rs)"
+user_agent = "Mozilla/5.0 (compatible; lychee/0.23; +https://lychee.cli.rs)"
 
 # Treat these HTTP codes as success. 403 is common on hosts that 403 bots
 # even with a browser UA; the URL still exists and we don't want to churn on it.
@@ -28,7 +28,9 @@ max_cache_age = "1d"
 scheme = ["https", "http", "mailto"]
 
 # Resolve relative links from the repo root, not the markdown file's directory.
-base = "."
+# NOTE: lychee renamed `base` → `base_url` in v0.23 (the key `base` now
+# fails with "unknown field"). Keep this as `base_url` going forward.
+base_url = "."
 
 # Private/local/placeholder hosts we don't want to probe from CI.
 exclude = [
