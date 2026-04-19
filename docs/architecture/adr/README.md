@@ -20,6 +20,7 @@ decision, and the consequences — good and bad.
 |---|---|---|---|
 | [0001](0001-langgraph-supervisor.md) | LangGraph as the supervisor substrate | Accepted | 2026-04-16 |
 | [0002](0002-consensus-threshold-95.md) | Consensus threshold ≥95% (not 100%, not majority) | Accepted | 2026-04-16 |
+| [0003](0003-terraform-adapter-v0.md) | Terraform adapter v0 (DigitalOcean first) | Accepted | 2026-04-18 |
 
 ## Rules of the road
 

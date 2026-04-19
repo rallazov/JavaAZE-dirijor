@@ -3,9 +3,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  DEFAULT_API_BASE,
   POLL_TIMEOUT_MS,
   SpinApiError,
+  deleteRealmJob,
   getRealmJob,
   postRealmSpin,
   resolveDirijorApiUrl,
@@ -42,7 +42,10 @@ export interface UseRealmSpinState {
   realmId: string | null;
   outputs: Record<string, unknown> | null;
   error: SpinApiError | null;
+  destroying: boolean;
+  destroyed: boolean;
   spinPrivateRealm: (args: SpinPrivateRealmArgs) => Promise<void>;
+  destroyPrivateRealm: () => Promise<void>;
   reset: () => void;
 }
 
@@ -55,10 +58,16 @@ export function useRealmSpin(): UseRealmSpinState {
   const [realmId, setRealmId] = useState<string | null>(null);
   const [outputs, setOutputs] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState<SpinApiError | null>(null);
+  const [destroying, setDestroying] = useState(false);
+  const [destroyed, setDestroyed] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const destroyIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
+    null
+  );
+  const destroyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeJobIdRef = useRef<string | null>(null);
   // Guard against overlapping polls when the interval callback runs
   // async work that outlives POLL_INTERVAL_MS (slow network, stalled
@@ -67,6 +76,7 @@ export function useRealmSpin(): UseRealmSpinState {
   // stays in a ref (not state) so the next tick observes the flag
   // synchronously without re-rendering.
   const pollInFlightRef = useRef<boolean>(false);
+  const destroyPollInFlightRef = useRef<boolean>(false);
 
   const clearTimers = useCallback(() => {
     if (intervalRef.current !== null) {
@@ -76,6 +86,14 @@ export function useRealmSpin(): UseRealmSpinState {
     if (timeoutRef.current !== null) {
       clearTimeout(timeoutRef.current);
       timeoutRef.current = null;
+    }
+    if (destroyIntervalRef.current !== null) {
+      clearInterval(destroyIntervalRef.current);
+      destroyIntervalRef.current = null;
+    }
+    if (destroyTimeoutRef.current !== null) {
+      clearTimeout(destroyTimeoutRef.current);
+      destroyTimeoutRef.current = null;
     }
   }, []);
 
@@ -126,12 +144,15 @@ export function useRealmSpin(): UseRealmSpinState {
       abortInFlight();
       activeJobIdRef.current = null;
       pollInFlightRef.current = false;
+      destroyPollInFlightRef.current = false;
 
       setError(null);
       setOutputs(null);
       setJobId(null);
       setRealmId(null);
       setPhase('validating');
+      setDestroyed(false);
+      setDestroying(false);
 
       const base = apiBase();
       const body: SpinRequest = { realm_description: args.realmDescription };
@@ -175,8 +196,9 @@ export function useRealmSpin(): UseRealmSpinState {
       // subscription once the `realm.spin.phase` event type lands on
       // WS /ws/realm/{realm_id}. The backend broadcast_event() helper
       // already exists (Story 3.3) and only needs a new event_type
-      // entry + a SCHEMA_VERSION bump 3 -> 4. Fixed-interval polling is
-      // a deliberate v0.1 shortcut documented in Story 2.1 known follow-ups.
+      // entry + a future SCHEMA_VERSION bump (e.g. 4 -> 5) when push-based
+      // realm.spin.phase ships. Fixed-interval polling is a deliberate v0.1
+      // shortcut documented in Story 2.1 known follow-ups.
       intervalRef.current = setInterval(async () => {
         if (activeJobIdRef.current !== accepted.job_id) return;
         if (Date.now() - pollStart > POLL_TIMEOUT_MS) return;
@@ -260,16 +282,216 @@ export function useRealmSpin(): UseRealmSpinState {
     [abortInFlight, applyTerminalJob, clearTimers]
   );
 
+  const destroyPrivateRealm = useCallback(async () => {
+    if (phase !== 'ready' || jobId === null) {
+      if (typeof console !== 'undefined' && console.warn) {
+        console.warn(
+          'useRealmSpin: destroyPrivateRealm ignored (need phase=ready and jobId)'
+        );
+      }
+      return;
+    }
+
+    const base = apiBase();
+    const targetJobId = jobId;
+
+    if (destroyIntervalRef.current !== null) {
+      clearInterval(destroyIntervalRef.current);
+      destroyIntervalRef.current = null;
+    }
+    if (destroyTimeoutRef.current !== null) {
+      clearTimeout(destroyTimeoutRef.current);
+      destroyTimeoutRef.current = null;
+    }
+
+    setDestroying(true);
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    try {
+      const accepted = await deleteRealmJob(
+        base,
+        targetJobId,
+        controller.signal
+      );
+
+      if (accepted === null) {
+        setDestroying(false);
+        setDestroyed(true);
+        try {
+          const j = await getRealmJob(base, targetJobId, controller.signal);
+          setOutputs((j.outputs ?? {}) as Record<string, unknown>);
+        } catch {
+          setOutputs({ destroyed: true });
+        }
+        return;
+      }
+
+      const pollStart = Date.now();
+
+      // TODO(2.x-or-6.3): replace this 750ms poll with a WebSocket push
+      // subscription once the `realm.spin.phase` event type lands on
+      // WS /ws/realm/{realm_id}. The backend broadcast_event() helper
+      // already exists (Story 3.3) and only needs a new event_type
+      // entry + a future SCHEMA_VERSION bump (e.g. 4 -> 5) when push-based
+      // realm.spin.phase ships. Fixed-interval polling is a deliberate v0.1
+      // shortcut documented in Story 2.1 known follow-ups.
+      destroyIntervalRef.current = setInterval(async () => {
+        if (Date.now() - pollStart > POLL_TIMEOUT_MS) return;
+        if (destroyPollInFlightRef.current) return;
+        destroyPollInFlightRef.current = true;
+        const pollController = new AbortController();
+        abortRef.current = pollController;
+        try {
+          const job = await getRealmJob(
+            base,
+            targetJobId,
+            pollController.signal
+          );
+          const out = job.outputs ?? {};
+          if (out.destroyed === true) {
+            if (destroyIntervalRef.current !== null) {
+              clearInterval(destroyIntervalRef.current);
+              destroyIntervalRef.current = null;
+            }
+            if (destroyTimeoutRef.current !== null) {
+              clearTimeout(destroyTimeoutRef.current);
+              destroyTimeoutRef.current = null;
+            }
+            setOutputs(out as Record<string, unknown>);
+            setDestroying(false);
+            setDestroyed(true);
+            return;
+          }
+          if (out.destroy_error != null) {
+            if (typeof out.destroy_error !== 'object') {
+              if (destroyIntervalRef.current !== null) {
+                clearInterval(destroyIntervalRef.current);
+                destroyIntervalRef.current = null;
+              }
+              if (destroyTimeoutRef.current !== null) {
+                clearTimeout(destroyTimeoutRef.current);
+                destroyTimeoutRef.current = null;
+              }
+              setDestroying(false);
+              setError(
+                new SpinApiError(
+                  'bad_response',
+                  'outputs.destroy_error has unexpected shape',
+                  0
+                )
+              );
+              return;
+            }
+            const d = out.destroy_error as {
+              code?: string;
+              message?: string;
+              details?: Record<string, unknown>;
+            };
+            if (destroyIntervalRef.current !== null) {
+              clearInterval(destroyIntervalRef.current);
+              destroyIntervalRef.current = null;
+            }
+            if (destroyTimeoutRef.current !== null) {
+              clearTimeout(destroyTimeoutRef.current);
+              destroyTimeoutRef.current = null;
+            }
+            setDestroying(false);
+            setError(
+              new SpinApiError(
+                typeof d.code === 'string' ? d.code : 'terraform_destroy_failed',
+                typeof d.message === 'string' ? d.message : 'destroy failed',
+                0,
+                d.details ?? {}
+              )
+            );
+          }
+        } catch (err) {
+          if (err instanceof Error && err.name === 'AbortError') return;
+          if (destroyIntervalRef.current !== null) {
+            clearInterval(destroyIntervalRef.current);
+            destroyIntervalRef.current = null;
+          }
+          if (destroyTimeoutRef.current !== null) {
+            clearTimeout(destroyTimeoutRef.current);
+            destroyTimeoutRef.current = null;
+          }
+          if (err instanceof SpinApiError) {
+            setDestroying(false);
+            setError(err);
+          } else {
+            setDestroying(false);
+            setError(
+              new SpinApiError(
+                'bad_response',
+                err instanceof Error
+                  ? `destroy poll raised unexpected error: ${err.message}`
+                  : 'destroy poll raised non-Error throwable',
+                0
+              )
+            );
+          }
+        } finally {
+          destroyPollInFlightRef.current = false;
+        }
+      }, POLL_INTERVAL_MS);
+
+      destroyTimeoutRef.current = setTimeout(() => {
+        if (destroyIntervalRef.current !== null) {
+          clearInterval(destroyIntervalRef.current);
+          destroyIntervalRef.current = null;
+        }
+        destroyTimeoutRef.current = null;
+        const timeoutErr = new SpinApiError(
+          'poll_timeout',
+          `realm destroy did not finish within ${POLL_TIMEOUT_MS}ms`,
+          0,
+          { job_id: targetJobId }
+        );
+        if (typeof console !== 'undefined' && console.warn) {
+          try {
+            console.warn(
+              'useRealmSpin: destroy poll_timeout job_id=%s',
+              targetJobId
+            );
+          } catch {
+            /* ignore */
+          }
+        }
+        setDestroying(false);
+        setError(timeoutErr);
+      }, POLL_TIMEOUT_MS);
+    } catch (err) {
+      setDestroying(false);
+      if (err instanceof Error && err.name === 'AbortError') return;
+      if (err instanceof SpinApiError) {
+        setError(err);
+      } else {
+        setError(
+          new SpinApiError(
+            'network_error',
+            err instanceof Error ? err.message : 'unknown',
+            0
+          )
+        );
+      }
+    }
+  }, [phase, jobId]);
+
   const reset = useCallback(() => {
     clearTimers();
     abortInFlight();
     activeJobIdRef.current = null;
     pollInFlightRef.current = false;
+    destroyPollInFlightRef.current = false;
     setPhase('idle');
     setJobId(null);
     setRealmId(null);
     setOutputs(null);
     setError(null);
+    setDestroyed(false);
+    setDestroying(false);
   }, [abortInFlight, clearTimers]);
 
   useEffect(() => {
@@ -278,6 +500,7 @@ export function useRealmSpin(): UseRealmSpinState {
       abortInFlight();
       activeJobIdRef.current = null;
       pollInFlightRef.current = false;
+      destroyPollInFlightRef.current = false;
     };
   }, [abortInFlight, clearTimers]);
 
@@ -287,7 +510,10 @@ export function useRealmSpin(): UseRealmSpinState {
     realmId,
     outputs,
     error,
+    destroying,
+    destroyed,
     spinPrivateRealm,
+    destroyPrivateRealm,
     reset,
   };
 }

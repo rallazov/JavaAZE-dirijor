@@ -16,7 +16,11 @@ shipped just for tests (Story 3.1 AC 6, Story 3.2 AC 7, Story 3.3 AC 8).
 from __future__ import annotations
 
 import asyncio
+import json
 import time
+import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -235,17 +239,16 @@ def test_root_preserves_v01_superset():
 def test_schema_version_pinned():
     """Loud regression guard — bumping SCHEMA_VERSION requires deliberately
     updating this test AND README sample payloads (Story 3.1 AC 5,
-    Story 3.2 AC 5, Story 3.3 AC 7)."""
-    assert supervisor.SCHEMA_VERSION == 3
+    Story 3.2 AC 5, Story 3.3 AC 7, Story 2.2 AC 10)."""
+    assert supervisor.SCHEMA_VERSION == 4
     assert supervisor.SERVICE_VERSION == "0.1.0"
 
 
-def test_schema_version_is_3():
-    """Explicit belt-and-braces pin from Story 3.3 AC 8 (renamed from
-    `_is_2`; integer bumped from 2 → 3). If a future story bumps
-    SCHEMA_VERSION again, BOTH this test and `test_schema_version_pinned`
-    must be updated together so the intent is impossible to miss in diff review."""
-    assert supervisor.SCHEMA_VERSION == 3
+def test_schema_version_is_4():
+    """Explicit belt-and-braces pin — Story 2.2 bumped 3 → 4. If a future
+    story bumps SCHEMA_VERSION again, BOTH this test and
+    `test_schema_version_pinned` must be updated together."""
+    assert supervisor.SCHEMA_VERSION == 4
 
 
 # --- Story 3.2 AC 1–4, AC 7 (new debate-loop coverage) ----------------------
@@ -712,9 +715,11 @@ def _drain_spin_jobs():
     """
     supervisor._SPIN_JOBS.clear()
     supervisor._JOB_BY_REALM.clear()
+    supervisor._RUNNING_DESTROY_TASKS.clear()
     yield
     supervisor._SPIN_JOBS.clear()
     supervisor._JOB_BY_REALM.clear()
+    supervisor._RUNNING_DESTROY_TASKS.clear()
 
 
 def _clear_spin_state() -> None:
@@ -1188,15 +1193,6 @@ def test_spin_running_task_set_is_released_after_terminal(monkeypatch):
     assert supervisor._RUNNING_SPIN_TASKS == set()
 
 
-def test_schema_version_still_3():
-    """AC 6 — Story 2.1 is a dep-only additive change; SCHEMA_VERSION
-    stays at 3. If a future story bumps the integer, this test (and the
-    sibling `test_schema_version_pinned` / `test_schema_version_is_3`)
-    must all be updated together so the intent is impossible to miss in
-    a diff review."""
-    assert supervisor.SCHEMA_VERSION == 3
-
-
 def test_root_includes_realtime_block():
     """AC 7 — `GET /` body gains the additive `realtime` block."""
     response = client.get("/")
@@ -1215,3 +1211,887 @@ def test_root_includes_realtime_block():
     # v0.1 superset invariant still holds (AC 9) — `realtime` is purely additive.
     for legacy_key in ("service", "version", "status", "consensus_engine"):
         assert legacy_key in body
+
+
+# --- Story 2.2 (Terraform adapter) --------------------------------------------
+
+
+def _tf_output_stdout() -> str:
+    return json.dumps(
+        {
+            "realm_vpc_id": {
+                "value": "d3b3a0c4-1234-5678-9abc-def012345678",
+                "type": "string",
+            },
+            "realm_vpc_ip_range": {
+                "value": "10.10.0.0/16",
+                "type": "string",
+            },
+        }
+    )
+
+
+@dataclass
+class _StubTerraformRunner:
+    """Records terraform CLI calls; returns canned `CompletedRun` per subcommand."""
+
+    calls: list[tuple[list[str], Path, tuple[str, ...]]] = field(
+        default_factory=list
+    )
+    queue: dict[str, supervisor.CompletedRun] = field(default_factory=dict)
+    raise_on: dict[str, BaseException] = field(default_factory=dict)
+
+    async def run(self, args, *, cwd, env, timeout_s):
+        env_keys = tuple(sorted(env.keys()))
+        self.calls.append((list(args), cwd, env_keys))
+        step = args[0] if args else ""
+        if step in self.raise_on:
+            raise self.raise_on[step]
+        if step in self.queue:
+            return self.queue[step]
+        if step == "output":
+            return supervisor.CompletedRun(0, _tf_output_stdout(), "", 0.01)
+        if step == "plan" and cwd:
+            (Path(cwd) / "tfplan.binary").write_bytes(b"plan-bytes-for-digest")
+        return supervisor.CompletedRun(0, "", "", 0.01)
+
+
+def _tf_env_provider() -> dict[str, str]:
+    return {
+        "DIGITALOCEAN_TOKEN": "do_pat_" + "0" * 64,
+        "TF_VAR_do_token": "do_pat_" + "0" * 64,
+        "TF_IN_AUTOMATION": "1",
+        "TF_INPUT": "0",
+        "HOME": "/tmp",
+        "PATH": "/usr/bin",
+    }
+
+
+def test_terraform_adapter_registered_when_token_and_binary_present(monkeypatch):
+    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    monkeypatch.setattr(supervisor.shutil, "which", lambda b: "/usr/local/bin/terraform")
+    adapter = supervisor._build_terraform_adapter()
+    assert adapter is not None
+    assert adapter.name == "terraform-digitalocean"
+
+
+def test_terraform_adapter_skipped_when_token_absent(monkeypatch):
+    monkeypatch.delenv("DIGITALOCEAN_TOKEN", raising=False)
+    monkeypatch.setattr(supervisor.shutil, "which", lambda b: "/usr/local/bin/terraform")
+    assert supervisor._build_terraform_adapter() is None
+
+
+def test_terraform_adapter_skipped_when_binary_missing(monkeypatch):
+    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    monkeypatch.setattr(supervisor.shutil, "which", lambda b: None)
+    monkeypatch.setenv("DIRIJOR_TERRAFORM_BINARY", "/nonexistent/terraform")
+    assert supervisor._build_terraform_adapter() is None
+
+
+def test_spin_terraform_adapter_accepts_and_returns_202(monkeypatch, tmp_path):
+    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    stub = _StubTerraformRunner()
+    tf = supervisor.TerraformAdapter(
+        workspace_root=tmp_path,
+        subprocess_runner=stub,
+        env_provider=_tf_env_provider,
+        module_source=tmp_path / "mod",
+    )
+    (tmp_path / "mod").mkdir()
+    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
+    monkeypatch.setattr(
+        supervisor,
+        "_ADAPTERS",
+        {
+            "local-noop": supervisor._ADAPTERS["local-noop"],
+            "terraform-digitalocean": tf,
+        },
+    )
+    _clear_spin_state()
+    response = client.post(
+        "/realms/spin",
+        json={
+            "realm_description": "finance prod",
+            "adapter_hint": "terraform-digitalocean",
+            "agent_count": 3,
+        },
+    )
+    assert response.status_code == 202
+    body = response.json()
+    assert body["adapter"] == "terraform-digitalocean"
+    assert body["schema_version"] == 4
+
+
+def test_spin_terraform_lifecycle_progresses_to_ready(monkeypatch, tmp_path):
+    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    stub = _StubTerraformRunner()
+    tf = supervisor.TerraformAdapter(
+        workspace_root=tmp_path,
+        subprocess_runner=stub,
+        env_provider=_tf_env_provider,
+        module_source=tmp_path / "mod",
+    )
+    (tmp_path / "mod").mkdir()
+    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
+    monkeypatch.setattr(
+        supervisor,
+        "_ADAPTERS",
+        {
+            "local-noop": supervisor._ADAPTERS["local-noop"],
+            "terraform-digitalocean": tf,
+        },
+    )
+    _clear_spin_state()
+    with TestClient(supervisor.app) as local_client:
+        resp = local_client.post(
+            "/realms/spin",
+            json={
+                "realm_description": "finance prod",
+                "adapter_hint": "terraform-digitalocean",
+                "agent_count": 3,
+            },
+        )
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        final: dict = {}
+        for _ in range(400):
+            time.sleep(0.005)
+            r = local_client.get(f"/realms/{job_id}")
+            final = r.json()
+            if final["phase"] in ("ready", "failed"):
+                break
+        assert final["phase"] == "ready"
+        assert final["outputs"]["adapter"] == "terraform-digitalocean"
+        assert final["outputs"]["mesh_endpoint"].startswith("tf://")
+        assert final["outputs"]["realm_vpc_id"]
+        assert isinstance(final["outputs"]["tf_workspace"], str)
+
+
+def test_spin_terraform_invokes_commands_in_order(monkeypatch, tmp_path):
+    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    stub = _StubTerraformRunner()
+    tf = supervisor.TerraformAdapter(
+        workspace_root=tmp_path,
+        subprocess_runner=stub,
+        env_provider=_tf_env_provider,
+        module_source=tmp_path / "mod",
+    )
+    (tmp_path / "mod").mkdir()
+    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
+    monkeypatch.setattr(
+        supervisor,
+        "_ADAPTERS",
+        {
+            "local-noop": supervisor._ADAPTERS["local-noop"],
+            "terraform-digitalocean": tf,
+        },
+    )
+    _clear_spin_state()
+    with TestClient(supervisor.app) as local_client:
+        resp = local_client.post(
+            "/realms/spin",
+            json={
+                "realm_description": "order test",
+                "adapter_hint": "terraform-digitalocean",
+            },
+        )
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        ws = tmp_path / resp.json()["realm_id"]
+        for _ in range(400):
+            time.sleep(0.005)
+            body = local_client.get(f"/realms/{job_id}").json()
+            if body["phase"] in ("ready", "failed"):
+                break
+    expected = [
+        ["init", "-input=false", "-no-color"],
+        ["validate", "-no-color"],
+        ["plan", "-input=false", "-no-color", "-var-file=terraform.tfvars.json", "-out=tfplan.binary"],
+        ["apply", "-input=false", "-auto-approve", "-no-color", "tfplan.binary"],
+        ["output", "-json", "-no-color"],
+    ]
+    assert [c[0] for c in stub.calls] == expected
+    for args, cwd, env_keys in stub.calls:
+        assert cwd == ws
+        assert "DIGITALOCEAN_TOKEN" in env_keys
+
+
+def test_spin_terraform_init_failure_surfaces_terraform_init_failed(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    stub = _StubTerraformRunner()
+    stub.queue["init"] = supervisor.CompletedRun(1, "", "init failed hard", 0.01)
+    tf = supervisor.TerraformAdapter(
+        workspace_root=tmp_path,
+        subprocess_runner=stub,
+        env_provider=_tf_env_provider,
+        module_source=tmp_path / "mod",
+    )
+    (tmp_path / "mod").mkdir()
+    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
+    monkeypatch.setattr(
+        supervisor,
+        "_ADAPTERS",
+        {
+            "local-noop": supervisor._ADAPTERS["local-noop"],
+            "terraform-digitalocean": tf,
+        },
+    )
+    _clear_spin_state()
+    with TestClient(supervisor.app) as local_client:
+        resp = local_client.post(
+            "/realms/spin",
+            json={
+                "realm_description": "fail init",
+                "adapter_hint": "terraform-digitalocean",
+            },
+        )
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        final: dict = {}
+        for _ in range(400):
+            time.sleep(0.005)
+            body = local_client.get(f"/realms/{job_id}").json()
+            if body["phase"] in ("ready", "failed"):
+                final = body
+                break
+    assert final["phase"] == "failed"
+    assert final["error"]["code"] == "terraform_init_failed"
+    assert final["error"]["details"]["step"] == "init"
+
+
+def test_spin_terraform_validate_failure_surfaces_terraform_validate_failed(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    stub = _StubTerraformRunner()
+    stub.queue["validate"] = supervisor.CompletedRun(1, "", "validate bad", 0.01)
+    tf = supervisor.TerraformAdapter(
+        workspace_root=tmp_path,
+        subprocess_runner=stub,
+        env_provider=_tf_env_provider,
+        module_source=tmp_path / "mod",
+    )
+    (tmp_path / "mod").mkdir()
+    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
+    monkeypatch.setattr(
+        supervisor,
+        "_ADAPTERS",
+        {
+            "local-noop": supervisor._ADAPTERS["local-noop"],
+            "terraform-digitalocean": tf,
+        },
+    )
+    _clear_spin_state()
+    with TestClient(supervisor.app) as local_client:
+        resp = local_client.post(
+            "/realms/spin",
+            json={
+                "realm_description": "fail val",
+                "adapter_hint": "terraform-digitalocean",
+            },
+        )
+        job_id = resp.json()["job_id"]
+        final: dict = {}
+        for _ in range(400):
+            time.sleep(0.005)
+            body = local_client.get(f"/realms/{job_id}").json()
+            if body["phase"] in ("ready", "failed"):
+                final = body
+                break
+    assert final["error"]["code"] == "terraform_validate_failed"
+    assert final["error"]["details"]["step"] == "validate"
+
+
+def test_spin_terraform_plan_failure_surfaces_terraform_plan_failed(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    stub = _StubTerraformRunner()
+    stub.queue["plan"] = supervisor.CompletedRun(1, "", "plan bad", 0.01)
+    tf = supervisor.TerraformAdapter(
+        workspace_root=tmp_path,
+        subprocess_runner=stub,
+        env_provider=_tf_env_provider,
+        module_source=tmp_path / "mod",
+    )
+    (tmp_path / "mod").mkdir()
+    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
+    monkeypatch.setattr(
+        supervisor,
+        "_ADAPTERS",
+        {
+            "local-noop": supervisor._ADAPTERS["local-noop"],
+            "terraform-digitalocean": tf,
+        },
+    )
+    _clear_spin_state()
+    with TestClient(supervisor.app) as local_client:
+        resp = local_client.post(
+            "/realms/spin",
+            json={
+                "realm_description": "fail plan",
+                "adapter_hint": "terraform-digitalocean",
+            },
+        )
+        job_id = resp.json()["job_id"]
+        final: dict = {}
+        for _ in range(400):
+            time.sleep(0.005)
+            body = local_client.get(f"/realms/{job_id}").json()
+            if body["phase"] in ("ready", "failed"):
+                final = body
+                break
+    assert final["error"]["code"] == "terraform_plan_failed"
+    assert final["error"]["details"]["step"] == "plan"
+
+
+def test_spin_terraform_apply_failure_surfaces_terraform_apply_failed(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    stub = _StubTerraformRunner()
+    stub.queue["apply"] = supervisor.CompletedRun(1, "", "apply bad", 0.01)
+    tf = supervisor.TerraformAdapter(
+        workspace_root=tmp_path,
+        subprocess_runner=stub,
+        env_provider=_tf_env_provider,
+        module_source=tmp_path / "mod",
+    )
+    (tmp_path / "mod").mkdir()
+    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
+    monkeypatch.setattr(
+        supervisor,
+        "_ADAPTERS",
+        {
+            "local-noop": supervisor._ADAPTERS["local-noop"],
+            "terraform-digitalocean": tf,
+        },
+    )
+    _clear_spin_state()
+    with TestClient(supervisor.app) as local_client:
+        resp = local_client.post(
+            "/realms/spin",
+            json={
+                "realm_description": "fail apply",
+                "adapter_hint": "terraform-digitalocean",
+            },
+        )
+        job_id = resp.json()["job_id"]
+        final: dict = {}
+        for _ in range(400):
+            time.sleep(0.005)
+            body = local_client.get(f"/realms/{job_id}").json()
+            if body["phase"] in ("ready", "failed"):
+                final = body
+                break
+    assert final["error"]["code"] == "terraform_apply_failed"
+    assert final["error"]["details"]["partial_apply"] is True
+    assert "DELETE /realms/" in final["error"]["message"]
+
+
+def test_spin_terraform_apply_failure_scrubs_do_pat_tokens(monkeypatch, tmp_path):
+    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    token = "do_pat_" + "a" * 64
+    stub = _StubTerraformRunner()
+    stub.queue["apply"] = supervisor.CompletedRun(
+        1, "", f"leaked {token} in stderr", 0.01
+    )
+    tf = supervisor.TerraformAdapter(
+        workspace_root=tmp_path,
+        subprocess_runner=stub,
+        env_provider=_tf_env_provider,
+        module_source=tmp_path / "mod",
+    )
+    (tmp_path / "mod").mkdir()
+    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
+    monkeypatch.setattr(
+        supervisor,
+        "_ADAPTERS",
+        {
+            "local-noop": supervisor._ADAPTERS["local-noop"],
+            "terraform-digitalocean": tf,
+        },
+    )
+    _clear_spin_state()
+    with TestClient(supervisor.app) as local_client:
+        resp = local_client.post(
+            "/realms/spin",
+            json={
+                "realm_description": "scrub test",
+                "adapter_hint": "terraform-digitalocean",
+            },
+        )
+        job_id = resp.json()["job_id"]
+        final: dict = {}
+        for _ in range(400):
+            time.sleep(0.005)
+            body = local_client.get(f"/realms/{job_id}").json()
+            if body["phase"] in ("ready", "failed"):
+                final = body
+                break
+    preview = final["error"]["details"]["stderr_preview"]
+    assert token not in preview
+    assert "do_pat_<REDACTED>" in preview
+
+
+def test_spin_terraform_command_timeout_surfaces_terraform_command_timeout(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    stub = _StubTerraformRunner()
+    stub.raise_on["plan"] = TimeoutError()
+    tf = supervisor.TerraformAdapter(
+        workspace_root=tmp_path,
+        subprocess_runner=stub,
+        env_provider=_tf_env_provider,
+        module_source=tmp_path / "mod",
+    )
+    (tmp_path / "mod").mkdir()
+    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
+    monkeypatch.setattr(
+        supervisor,
+        "_ADAPTERS",
+        {
+            "local-noop": supervisor._ADAPTERS["local-noop"],
+            "terraform-digitalocean": tf,
+        },
+    )
+    _clear_spin_state()
+    with TestClient(supervisor.app) as local_client:
+        resp = local_client.post(
+            "/realms/spin",
+            json={
+                "realm_description": "timeout",
+                "adapter_hint": "terraform-digitalocean",
+            },
+        )
+        job_id = resp.json()["job_id"]
+        final: dict = {}
+        for _ in range(400):
+            time.sleep(0.005)
+            body = local_client.get(f"/realms/{job_id}").json()
+            if body["phase"] in ("ready", "failed"):
+                final = body
+                break
+    assert final["error"]["code"] == "terraform_command_timeout"
+    assert final["error"]["details"]["step"] == "plan"
+    assert final["error"]["details"]["timeout_s"] == tf._cmd_timeout_s
+
+
+def test_spin_terraform_credentials_missing_at_validate_time_surfaces_adapter_credentials_missing(
+    monkeypatch, tmp_path
+):
+    stub = _StubTerraformRunner()
+    tf = supervisor.TerraformAdapter(
+        workspace_root=tmp_path,
+        subprocess_runner=stub,
+        env_provider=supervisor._default_env_provider,
+        module_source=tmp_path / "mod",
+    )
+    (tmp_path / "mod").mkdir()
+    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
+    monkeypatch.setattr(
+        supervisor,
+        "_ADAPTERS",
+        {
+            "local-noop": supervisor._ADAPTERS["local-noop"],
+            "terraform-digitalocean": tf,
+        },
+    )
+    _clear_spin_state()
+    monkeypatch.delenv("DIGITALOCEAN_TOKEN", raising=False)
+    with TestClient(supervisor.app) as local_client:
+        resp = local_client.post(
+            "/realms/spin",
+            json={
+                "realm_description": "no creds",
+                "adapter_hint": "terraform-digitalocean",
+            },
+        )
+        job_id = resp.json()["job_id"]
+        final: dict = {}
+        for _ in range(400):
+            time.sleep(0.005)
+            body = local_client.get(f"/realms/{job_id}").json()
+            if body["phase"] in ("ready", "failed"):
+                final = body
+                break
+    assert final["error"]["code"] == "adapter_credentials_missing"
+
+
+def test_destroy_on_ready_job_returns_202_and_runs_terraform_destroy(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    stub = _StubTerraformRunner()
+    tf = supervisor.TerraformAdapter(
+        workspace_root=tmp_path,
+        subprocess_runner=stub,
+        env_provider=_tf_env_provider,
+        module_source=tmp_path / "mod",
+    )
+    (tmp_path / "mod").mkdir()
+    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
+    monkeypatch.setattr(
+        supervisor,
+        "_ADAPTERS",
+        {
+            "local-noop": supervisor._ADAPTERS["local-noop"],
+            "terraform-digitalocean": tf,
+        },
+    )
+    _clear_spin_state()
+    with TestClient(supervisor.app) as local_client:
+        resp = local_client.post(
+            "/realms/spin",
+            json={
+                "realm_description": "destroy me",
+                "adapter_hint": "terraform-digitalocean",
+            },
+        )
+        job_id = resp.json()["job_id"]
+        for _ in range(400):
+            time.sleep(0.005)
+            body = local_client.get(f"/realms/{job_id}").json()
+            if body["phase"] == "ready":
+                break
+        d = local_client.delete(f"/realms/{job_id}")
+        assert d.status_code == 202
+        assert d.json()["outputs"]["destroy_requested_at"]
+        for _ in range(400):
+            time.sleep(0.005)
+            body = local_client.get(f"/realms/{job_id}").json()
+            if body["outputs"].get("destroyed"):
+                break
+        assert body["outputs"]["destroyed"] is True
+        assert body["outputs"]["destroyed_at"]
+        destroy_calls = [c for c in stub.calls if c[0] and c[0][0] == "destroy"]
+    assert destroy_calls, "expected terraform destroy"
+
+
+def test_destroy_on_non_ready_job_returns_409_destroy_invalid_state(monkeypatch):
+    _clear_spin_state()
+    monkeypatch.setattr(supervisor, "PROVISION_DELAY_S", 0.01)
+
+    async def _stall_validate(self, req: supervisor.SpinRequest) -> None:
+        await asyncio.sleep(30.0)
+
+    monkeypatch.setattr(supervisor.LocalNoopAdapter, "validate", _stall_validate)
+    with TestClient(supervisor.app) as local_client:
+        resp = local_client.post(
+            "/realms/spin",
+            json={
+                "realm_description": "slow",
+                "adapter_hint": "local-noop",
+            },
+        )
+        job_id = resp.json()["job_id"]
+        del_resp = local_client.delete(f"/realms/{job_id}")
+        assert del_resp.status_code == 409
+        err = del_resp.json()
+        assert err["code"] == "destroy_invalid_state"
+        assert err["details"]["current_phase"] == "validating"
+
+
+def test_destroy_idempotent_on_already_destroyed_returns_204(monkeypatch):
+    monkeypatch.setattr(supervisor, "PROVISION_DELAY_S", 0.01)
+    _clear_spin_state()
+    with TestClient(supervisor.app) as local_client:
+        resp = local_client.post(
+            "/realms/spin",
+            json={"realm_description": "noop destroy", "adapter_hint": "local-noop"},
+        )
+        job_id = resp.json()["job_id"]
+        for _ in range(200):
+            time.sleep(0.01)
+            body = local_client.get(f"/realms/{job_id}").json()
+            if body["phase"] == "ready":
+                break
+        first = local_client.delete(f"/realms/{job_id}")
+        assert first.status_code == 202
+        for _ in range(200):
+            time.sleep(0.01)
+            body = local_client.get(f"/realms/{job_id}").json()
+            if body["outputs"].get("destroyed"):
+                break
+        second = local_client.delete(f"/realms/{job_id}")
+        assert second.status_code == 204
+
+
+def test_delete_realm_job_409_destroy_already_requested_injected():
+    """Second DELETE while destroy is in flight → 409 destroy_already_requested."""
+    _clear_spin_state()
+    jid = str(uuid.uuid4())
+    rid = "realm-409destroy"
+    now = supervisor._iso_now()
+    job = supervisor.SpinJob(
+        job_id=jid,
+        realm_id=rid,
+        phase="ready",
+        adapter="local-noop",
+        created_at=now,
+        updated_at=now,
+        realm_description="x",
+        agent_count=1,
+        outputs={"destroy_requested_at": now, "destroyed": False},
+        error=None,
+        schema_version=supervisor.SCHEMA_VERSION,
+    )
+    supervisor._SPIN_JOBS[jid] = job
+    supervisor._JOB_BY_REALM[rid] = jid
+    resp = client.delete(f"/realms/{jid}")
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["code"] == "destroy_already_requested"
+
+
+def test_delete_realm_job_500_when_adapter_not_registered():
+    _clear_spin_state()
+    jid = str(uuid.uuid4())
+    rid = "realm-noadapter"
+    now = supervisor._iso_now()
+    job = supervisor.SpinJob(
+        job_id=jid,
+        realm_id=rid,
+        phase="ready",
+        adapter="not-registered-adapter-name",
+        created_at=now,
+        updated_at=now,
+        realm_description="x",
+        agent_count=1,
+        outputs={},
+        error=None,
+        schema_version=supervisor.SCHEMA_VERSION,
+    )
+    supervisor._SPIN_JOBS[jid] = job
+    supervisor._JOB_BY_REALM[rid] = jid
+    resp = client.delete(f"/realms/{jid}")
+    assert resp.status_code == 500
+    assert resp.json()["code"] == "internal"
+
+
+def test_destroy_failure_surfaces_terraform_destroy_failed_in_outputs(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    stub = _StubTerraformRunner()
+    stub.queue["destroy"] = supervisor.CompletedRun(1, "", "destroy failed", 0.01)
+    tf = supervisor.TerraformAdapter(
+        workspace_root=tmp_path,
+        subprocess_runner=stub,
+        env_provider=_tf_env_provider,
+        module_source=tmp_path / "mod",
+    )
+    (tmp_path / "mod").mkdir()
+    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
+    monkeypatch.setattr(
+        supervisor,
+        "_ADAPTERS",
+        {
+            "local-noop": supervisor._ADAPTERS["local-noop"],
+            "terraform-digitalocean": tf,
+        },
+    )
+    _clear_spin_state()
+    with TestClient(supervisor.app) as local_client:
+        resp = local_client.post(
+            "/realms/spin",
+            json={
+                "realm_description": "destroy fail",
+                "adapter_hint": "terraform-digitalocean",
+            },
+        )
+        job_id = resp.json()["job_id"]
+        for _ in range(400):
+            time.sleep(0.005)
+            body = local_client.get(f"/realms/{job_id}").json()
+            if body["phase"] == "ready":
+                break
+        local_client.delete(f"/realms/{job_id}")
+        final: dict = {}
+        for _ in range(400):
+            time.sleep(0.005)
+            body = local_client.get(f"/realms/{job_id}").json()
+            out = body.get("outputs") or {}
+            if out.get("destroy_error"):
+                final = body
+                break
+        assert final["outputs"]["destroy_error"]["code"] == "terraform_destroy_failed"
+
+
+def test_spin_terraform_malformed_output_json_surfaces_terraform_apply_failed(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    stub = _StubTerraformRunner()
+    stub.queue["output"] = supervisor.CompletedRun(0, "{not-json", "", 0.01)
+    tf = supervisor.TerraformAdapter(
+        workspace_root=tmp_path,
+        subprocess_runner=stub,
+        env_provider=_tf_env_provider,
+        module_source=tmp_path / "mod",
+    )
+    (tmp_path / "mod").mkdir()
+    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
+    monkeypatch.setattr(
+        supervisor,
+        "_ADAPTERS",
+        {
+            "local-noop": supervisor._ADAPTERS["local-noop"],
+            "terraform-digitalocean": tf,
+        },
+    )
+    _clear_spin_state()
+    with TestClient(supervisor.app) as local_client:
+        resp = local_client.post(
+            "/realms/spin",
+            json={
+                "realm_description": "bad output json",
+                "adapter_hint": "terraform-digitalocean",
+            },
+        )
+        job_id = resp.json()["job_id"]
+        final: dict = {}
+        for _ in range(400):
+            time.sleep(0.005)
+            body = local_client.get(f"/realms/{job_id}").json()
+            if body["phase"] in ("ready", "failed"):
+                final = body
+                break
+    assert final["phase"] == "failed"
+    assert final["error"]["code"] == "terraform_apply_failed"
+    assert final["error"]["details"].get("reason") == "terraform_output_malformed"
+
+
+def test_spin_terraform_output_step_nonzero_surfaces_terraform_apply_failed(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    stub = _StubTerraformRunner()
+    stub.queue["output"] = supervisor.CompletedRun(1, "", "output cmd failed", 0.01)
+    tf = supervisor.TerraformAdapter(
+        workspace_root=tmp_path,
+        subprocess_runner=stub,
+        env_provider=_tf_env_provider,
+        module_source=tmp_path / "mod",
+    )
+    (tmp_path / "mod").mkdir()
+    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
+    monkeypatch.setattr(
+        supervisor,
+        "_ADAPTERS",
+        {
+            "local-noop": supervisor._ADAPTERS["local-noop"],
+            "terraform-digitalocean": tf,
+        },
+    )
+    _clear_spin_state()
+    with TestClient(supervisor.app) as local_client:
+        resp = local_client.post(
+            "/realms/spin",
+            json={
+                "realm_description": "output nonzero",
+                "adapter_hint": "terraform-digitalocean",
+            },
+        )
+        job_id = resp.json()["job_id"]
+        final: dict = {}
+        for _ in range(400):
+            time.sleep(0.005)
+            body = local_client.get(f"/realms/{job_id}").json()
+            if body["phase"] in ("ready", "failed"):
+                final = body
+                break
+    assert final["phase"] == "failed"
+    assert final["error"]["code"] == "terraform_apply_failed"
+    assert final["error"]["details"].get("reason") == "terraform_output_failed"
+
+
+def test_terraform_adapter_invalid_cmd_timeout_env_falls_back(monkeypatch, tmp_path):
+    monkeypatch.setenv("DIRIJOR_TERRAFORM_CMD_TIMEOUT_S", "not-a-float")
+    stub = _StubTerraformRunner()
+    tf = supervisor.TerraformAdapter(
+        workspace_root=tmp_path,
+        subprocess_runner=stub,
+        env_provider=_tf_env_provider,
+        module_source=tmp_path / "mod",
+        cmd_timeout_s=42.5,
+    )
+    assert tf._cmd_timeout_s == 42.5
+
+
+def test_terraform_destroy_rejects_workspace_outside_root(monkeypatch, tmp_path):
+    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    stub = _StubTerraformRunner()
+    tf = supervisor.TerraformAdapter(
+        workspace_root=tmp_path / "wr",
+        subprocess_runner=stub,
+        env_provider=_tf_env_provider,
+        module_source=tmp_path / "mod",
+    )
+    (tmp_path / "mod").mkdir()
+    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
+    outside = tmp_path / "escape_ws"
+    outside.mkdir()
+    job = supervisor.SpinJob(
+        job_id="job-ws",
+        realm_id="realm-ws",
+        phase="ready",
+        adapter=tf.name,
+        created_at=supervisor._iso_now(),
+        updated_at=supervisor._iso_now(),
+        realm_description="x",
+        agent_count=1,
+        outputs={"tf_workspace": str(outside.resolve())},
+        error=None,
+        schema_version=supervisor.SCHEMA_VERSION,
+    )
+    with pytest.raises(supervisor.SpinValidationError) as ei:
+        asyncio.run(tf.destroy(job))
+    assert ei.value.code == "terraform_destroy_failed"
+    assert "escape" in ei.value.message.lower() or "workspace root" in (
+        ei.value.message + str(ei.value.details)
+    ).lower()
+
+
+def test_delete_realm_job_404_on_unknown_id():
+    _clear_spin_state()
+    response = client.delete("/realms/does-not-exist")
+    assert response.status_code == 404
+    assert response.json()["code"] == "job_not_found"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected_substr"),
+    [
+        ("prefix do_pat_" + "b" * 64 + " suffix", "do_pat_<REDACTED>"),
+        ("prefix do_v1_" + "c" * 64 + " suffix", "do_v1_<REDACTED>"),
+        ("export DIGITALOCEAN_TOKEN=supersecret", "DIGITALOCEAN_TOKEN=<REDACTED>"),
+        ('{"token": "abc123xyz"}', '"token": "<REDACTED>"'),
+    ],
+)
+def test_scrub_secrets_masks_all_documented_patterns(raw, expected_substr):
+    out = supervisor._scrub_secrets(raw)
+    assert expected_substr in out
+    if "do_pat" in raw:
+        assert "do_pat_b" not in out
+
+
+def test_local_noop_destroy_is_idempotent_noop():
+    job = supervisor.SpinJob(
+        job_id="j1",
+        realm_id="realm-x",
+        phase="ready",
+        adapter="local-noop",
+        created_at="2026-04-18T00:00:00.000000Z",
+        updated_at="2026-04-18T00:00:00.000000Z",
+        realm_description="x",
+        agent_count=1,
+        outputs={},
+        error=None,
+        schema_version=supervisor.SCHEMA_VERSION,
+    )
+    asyncio.run(supervisor._ADAPTERS["local-noop"].destroy(job))
+    asyncio.run(supervisor._ADAPTERS["local-noop"].destroy(job))

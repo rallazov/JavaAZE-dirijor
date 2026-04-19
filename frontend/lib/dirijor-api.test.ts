@@ -8,6 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_API_BASE,
+  deleteRealmJob,
   getRealmJob,
   postRealmSpin,
   resolveDirijorApiUrl,
@@ -22,7 +23,7 @@ const VALID_SPIN_RESPONSE: SpinResponse = {
   adapter: 'local-noop',
   created_at: '2026-04-17T10:12:44.117Z',
   status_url: '/realms/5f1c0b2e-3d4a-4f5b-8c7d-9e0a1b2c3d4e',
-  schema_version: 3,
+  schema_version: 4,
 };
 
 const VALID_SPIN_JOB: SpinJob = {
@@ -240,6 +241,100 @@ describe('getRealmJob', () => {
       code: 'job_not_found',
       httpStatus: 404,
     });
+  });
+});
+
+// --- Story 2.2 destroy surface ------------------------------------------------
+
+describe('deleteRealmJob', () => {
+  it('returns parsed SpinJob on 202', async () => {
+    const job = {
+      ...VALID_SPIN_JOB,
+      outputs: {
+        ...VALID_SPIN_JOB.outputs,
+        destroy_requested_at: '2026-04-18T12:00:00.000Z',
+        destroyed: false,
+      },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(mockJsonResponse(202, job))
+    );
+    const result = await deleteRealmJob(DEFAULT_API_BASE, job.job_id);
+    expect(result).toEqual(job);
+  });
+
+  it('returns null on 204', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        status: 204,
+        ok: true,
+        async json() {
+          return {};
+        },
+      } as unknown as Response)
+    );
+    expect(await deleteRealmJob(DEFAULT_API_BASE, 'j1')).toBeNull();
+  });
+
+  it('throws SpinApiError job_not_found on 404', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        mockJsonResponse(404, {
+          code: 'job_not_found',
+          message: 'missing',
+          details: { job_id: 'x' },
+        })
+      )
+    );
+    await expect(deleteRealmJob(DEFAULT_API_BASE, 'x')).rejects.toMatchObject({
+      code: 'job_not_found',
+      httpStatus: 404,
+    });
+  });
+
+  it('throws on 409 destroy_invalid_state', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        mockJsonResponse(409, {
+          code: 'destroy_invalid_state',
+          message: 'bad phase',
+          details: { current_phase: 'provisioning' },
+        })
+      )
+    );
+    await expect(deleteRealmJob(DEFAULT_API_BASE, 'j')).rejects.toMatchObject({
+      code: 'destroy_invalid_state',
+      httpStatus: 409,
+    });
+  });
+
+  it('throws on 409 destroy_already_requested', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        mockJsonResponse(409, {
+          code: 'destroy_already_requested',
+          message: 'already',
+          details: { destroy_requested_at: '2026-04-18T12:00:00.000Z' },
+        })
+      )
+    );
+    await expect(deleteRealmJob(DEFAULT_API_BASE, 'j')).rejects.toMatchObject({
+      code: 'destroy_already_requested',
+      httpStatus: 409,
+    });
+  });
+
+  it('throws network_error when fetch rejects', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('offline')));
+    const err = await deleteRealmJob(DEFAULT_API_BASE, 'j').catch((e) => e);
+    expect(err).toBeInstanceOf(SpinApiError);
+    expect(err.code).toBe('network_error');
+    expect(err.httpStatus).toBe(0);
   });
 });
 

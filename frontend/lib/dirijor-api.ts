@@ -23,6 +23,9 @@
  *     validation_failed | invalid_realm_id | adapter_unknown
  *     | realm_id_conflict | realm_manager_unavailable
  *     | job_not_found | adapter_error | internal
+ *     | terraform_init_failed | terraform_validate_failed | terraform_plan_failed
+ *     | terraform_apply_failed | terraform_destroy_failed | terraform_command_timeout
+ *     | adapter_credentials_missing | destroy_invalid_state | destroy_already_requested
  *   Client-synthesized (this module only):
  *     network_error  (fetch rejected, httpStatus=0)
  *     bad_response   (2xx body failed to parse or missing required keys)
@@ -253,6 +256,47 @@ export async function getRealmJob(
       throw new SpinApiError(
         'bad_response',
         'GET /realms/{job_id} 200 body missing required keys',
+        status
+      );
+    }
+    return parsed;
+  }
+  throw parseErrorBody(parsed, status);
+}
+
+/** DELETE /realms/{job_id}. Returns the parsed SpinJob on 202
+ *  (destroy accepted; poll GET to observe completion). Returns null
+ *  on 204 (idempotent no-op — already destroyed). Throws SpinApiError
+ *  on any other status or on network/parse failure. */
+export async function deleteRealmJob(
+  base: string,
+  jobId: string,
+  signal?: AbortSignal
+): Promise<SpinJob | null> {
+  const url = `${base.replace(/\/+$/, '')}/realms/${encodeURIComponent(jobId)}`;
+  let response: Response;
+  try {
+    response = await fetch(url, { method: 'DELETE', signal });
+  } catch (err) {
+    throw new SpinApiError(
+      'network_error',
+      err instanceof Error ? err.message : 'fetch failed',
+      0
+    );
+  }
+
+  const status = response.status;
+  if (status === 204) {
+    return null;
+  }
+
+  const parsed = await readJsonOrThrow(response, status);
+
+  if (status === 202) {
+    if (!isSpinJob(parsed)) {
+      throw new SpinApiError(
+        'bad_response',
+        'DELETE /realms/{job_id} 202 body missing required keys',
         status
       );
     }

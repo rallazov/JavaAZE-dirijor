@@ -100,6 +100,7 @@ nav:
           - Index: architecture/adr/README.md
           - "ADR-0001: LangGraph supervisor": architecture/adr/0001-langgraph-supervisor.md
           - "ADR-0002: Consensus threshold ≥95%": architecture/adr/0002-consensus-threshold-95.md
+          - "ADR-0003: Terraform adapter v0": architecture/adr/0003-terraform-adapter-v0.md
   - Canonical sources:
       - Product Requirements (PRD): DIRIJOR-PRD.md
       - Project context (contributors): project-context.md
