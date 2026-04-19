@@ -1,12 +1,86 @@
 # Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
-# Private Realm — DigitalOcean VPC only (Story 2.2). Mesh (5.1) and
-# Firecracker hosts (5.3) are out of scope here.
+# Private Realm — DigitalOcean VPC + tagged firewall with default-deny
+# public Internet egress (Story 2.3). Mesh (5.1) and Firecracker hosts (5.3)
+# are out of scope here.
 
 provider "digitalocean" {
   token = var.do_token
 }
 
+locals {
+  private_cidrs = [
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+  ]
+}
+
 resource "digitalocean_vpc" "realm_vpc" {
   name   = "${var.realm_name}-private-realm"
   region = "nyc3"
+}
+
+# Tag-scoped firewall — applies to future droplets tagged
+# `dirijor-realm-<realm_name>`. Outbound to the public Internet is omitted
+# unless `allow_public_egress` is true (FR10 / NFR6 default posture).
+resource "digitalocean_firewall" "realm_egress" {
+  name = "${var.realm_name}-egress"
+  tags = ["dirijor-realm-${var.realm_name}"]
+
+  depends_on = [digitalocean_vpc.realm_vpc]
+
+  inbound_rule {
+    protocol         = "tcp"
+    port_range       = "1-65535"
+    source_addresses = local.private_cidrs
+  }
+
+  inbound_rule {
+    protocol         = "udp"
+    port_range       = "1-65535"
+    source_addresses = local.private_cidrs
+  }
+
+  outbound_rule {
+    protocol              = "tcp"
+    port_range            = "1-65535"
+    destination_addresses = local.private_cidrs
+  }
+
+  outbound_rule {
+    protocol              = "udp"
+    port_range            = "1-65535"
+    destination_addresses = local.private_cidrs
+  }
+
+  outbound_rule {
+    protocol              = "icmp"
+    destination_addresses = local.private_cidrs
+  }
+
+  dynamic "outbound_rule" {
+    for_each = var.allow_public_egress ? [1] : []
+    content {
+      protocol              = "tcp"
+      port_range            = "1-65535"
+      destination_addresses = ["0.0.0.0/0", "::/0"]
+    }
+  }
+
+  dynamic "outbound_rule" {
+    for_each = var.allow_public_egress ? [1] : []
+    content {
+      protocol              = "udp"
+      port_range            = "1-65535"
+      destination_addresses = ["0.0.0.0/0", "::/0"]
+    }
+  }
+
+  dynamic "outbound_rule" {
+    for_each = var.allow_public_egress ? [1] : []
+    content {
+      protocol              = "icmp"
+      destination_addresses = ["0.0.0.0/0", "::/0"]
+    }
+  }
 }

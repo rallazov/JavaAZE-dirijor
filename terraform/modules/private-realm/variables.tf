@@ -18,3 +18,9 @@ variable "do_token" {
   type      = string
   sensitive = true
 }
+
+variable "allow_public_egress" {
+  type        = bool
+  default     = false
+  description = "When false (default), firewall outbound allows only RFC1918 destinations. When true, adds explicit outbound to 0.0.0.0/0 and ::/0 (operator opt-in)."
+}
