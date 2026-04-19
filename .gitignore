@@ -25,6 +25,10 @@ _bmad-output/
 # MkDocs build output (docs/ is the source; site/ is generated)
 site/
 
+# Dirijor local terraform workspaces (optional DIRIJOR_TERRAFORM_WORKSPACE_ROOT)
+/.dirijor/
+terraform-workspaces/
+
 # Terraform
 .terraform/
 *.tfstate

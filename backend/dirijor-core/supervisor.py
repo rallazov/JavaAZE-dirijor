@@ -40,32 +40,35 @@
 #   v3 (Story 2.1, 2026-04-18 — dep-only additive) — Adds `realm_manager`
 #     entry to the readiness registry `checks` / `dependencies` map and
 #     introduces the `POST /realms/spin` + `GET /realms/{job_id}` HTTP
-#     surface with a closed `SpinError.code` envelope. SCHEMA_VERSION is
-#     INTENTIONALLY NOT BUMPED: adding a key to the readiness registry is
-#     the canonical additive extension (callers iterate the map by key, not
-#     a closed enum) and does not break strict parsers. Spin responses echo
-#     `schema_version: 3` for feature detection. The closed code enum is
-#     `validation_failed | invalid_realm_id | adapter_unknown
-#     | realm_id_conflict | realm_manager_unavailable | job_not_found
-#     | adapter_error | internal`; adding a new code requires updating
-#     `docs/reference/supervisor-api.md` in the same PR.
+#     surface with a closed `SpinError.code` envelope. SCHEMA_VERSION was
+#     intentionally not bumped for 2.1 alone — see Story 2.2 changelog below.
+#   v4 (Story 2.2, 2026-04-18) — DELETE /realms/{job_id}; SpinJob.outputs
+#     destroy-lifecycle keys; nine new SpinError codes (terraform + destroy
+#     HTTP). See SCHEMA_VERSION comment below the literal.
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
+from contextlib import asynccontextmanager
+import os
 import re
+import shutil
+import tempfile
 import time
 import traceback
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Literal, Protocol, TypedDict, get_args
+from pathlib import Path
+from typing import Any, Callable, Literal, Mapping, Protocol, Sequence, TypedDict, get_args
 
 from fastapi import Body, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -75,16 +78,21 @@ logger = logging.getLogger("dirijor.supervisor")
 
 SERVICE_NAME = "dirijor-supervisor"
 SERVICE_VERSION = "0.1.0"
-# SCHEMA_VERSION intentionally stays at 3 after Story 2.1.
-# Rationale: Story 2.1 adds one new entry (`realm_manager`) to the
-# readiness-registry `checks`/`dependencies` map. Per the stability
-# policy in docs/reference/supervisor-api.md, callers iterate that
-# map by key — a new dependency entry is an ADDITIVE extension and
-# does NOT require a schema bump. Story 3.3 bumped 2 -> 3 because
-# it added a new top-level `realtime` block on RootStatus; 2.1 adds
-# no new top-level fields, so no bump is warranted. Precedent:
-# "dep-only additive" — see Story 2.1 Change Log + AC 6.
-SCHEMA_VERSION = 3
+# SCHEMA_VERSION bumped 3 -> 4 by Story 2.2. Rationale: additive
+# expansion of three surfaces:
+#   (a) DELETE /realms/{job_id} route — new endpoint.
+#   (b) SpinJob.outputs gains `destroy_requested_at`, `destroyed`,
+#       `destroyed_at`, `destroy_error` fields on terraform-backed
+#       jobs (outputs is a `dict[str, Any]` so this is a key-addition
+#       inside a free-form map — technically non-breaking, but we
+#       bump anyway so clients can feature-gate the destroy UI).
+#   (c) Nine new SpinError.code enum values (7 terraform-scoped
+#       adapter errors + 2 destroy-HTTP errors).
+# Contrast with Story 2.1 which did NOT bump: that story added a
+# readiness-registry dep only, which the stability policy
+# explicitly exempts. This bump follows the Story 3.3 precedent
+# (new top-level surface -> bump).
+SCHEMA_VERSION = 4
 STARTED_AT = time.monotonic()
 STARTUP_GRACE_S = 1.0
 
@@ -389,6 +397,14 @@ def _probe_realm_manager() -> tuple[bool, str | None]:
     # been registered. `_ADAPTERS` is defined later in the Story 2.1 block;
     # the probe is only invoked at request time (FastAPI handler or `/health`
     # poll), well after module import, so the forward reference is safe.
+    #
+    # Story 2.2: terraform-digitalocean is an **optional** adapter in v0.2 —
+    # the realm plane stays operational with only `local-noop` registered;
+    # degrading the supervisor on a missing DO token would make loopback-only
+    # dev environments perpetually unhealthy. Story 5.1 may promote
+    # `terraform-digitalocean` to `required: true` once mesh bootstrap lands.
+    # The probe remains toothless beyond the non-empty `_ADAPTERS` check — a
+    # richer dry-run probe is deferred (see deferred-work.md).
     if not _ADAPTERS:
         return False, "no adapters registered"
     return True, None
@@ -813,6 +829,15 @@ SpinErrorCode = Literal[
     "job_not_found",
     "adapter_error",
     "internal",
+    "terraform_init_failed",
+    "terraform_validate_failed",
+    "terraform_plan_failed",
+    "terraform_apply_failed",
+    "terraform_destroy_failed",
+    "terraform_command_timeout",
+    "adapter_credentials_missing",
+    "destroy_invalid_state",
+    "destroy_already_requested",
 ]
 _SPIN_ERROR_CODES: tuple[str, ...] = get_args(SpinErrorCode)
 
@@ -823,6 +848,21 @@ _SPIN_ERROR_CODES: tuple[str, ...] = get_args(SpinErrorCode)
 PROVISION_DELAY_S = 0.5
 
 _TERMINAL_PHASES: tuple[SpinPhase, ...] = ("ready", "failed")
+
+# Serialize DELETE /realms/{job_id} accept paths per job_id so two concurrent
+# requests cannot both pass the destroy_requested_at guard before either stamps it.
+_destroy_route_registry_lock = asyncio.Lock()
+_destroy_route_locks: dict[str, asyncio.Lock] = {}
+
+
+@asynccontextmanager
+async def _destroy_route_gate(job_id: str):
+    async with _destroy_route_registry_lock:
+        if job_id not in _destroy_route_locks:
+            _destroy_route_locks[job_id] = asyncio.Lock()
+        lock = _destroy_route_locks[job_id]
+    async with lock:
+        yield
 
 
 class SpinError(BaseModel):
@@ -983,6 +1023,8 @@ class RealmAdapter(Protocol):
         self, req: SpinRequest, job: SpinJob
     ) -> dict[str, Any]: ...
 
+    async def destroy(self, job: SpinJob) -> None: ...
+
 
 class LocalNoopAdapter:
     """v0.1 no-op adapter — validates `agent_count`, sleeps
@@ -1011,12 +1053,551 @@ class LocalNoopAdapter:
             "agent_count": req.agent_count,
         }
 
+    async def destroy(self, job: SpinJob) -> None:
+        """LocalNoop has no real resources to destroy; returns silently so
+        the DELETE path is uniform across adapters."""
+        return
 
-# Story 2.2 will register TerraformAdapter here; Story 2.3 will wrap
-# .provision with a default-deny egress policy decorator.
+
+# --- Terraform adapter (Story 2.2) -------------------------------------------
+#
+# The real subprocess runner is NEVER instantiated under pytest — every Story
+# 2.2 test builds a `TerraformAdapter` with a stub runner. This keeps the
+# test suite hermetic (no terraform binary on CI, no DO token, no network)
+# and deterministic. See `test_spin_terraform_lifecycle_progresses_to_ready`
+# for the canonical stub shape.
+#
+# TODO(6.1): OTel spans around provision/destroy subprocess calls.
+
+
+@dataclass(frozen=True)
+class CompletedRun:
+    """Result of one terraform subprocess invocation."""
+
+    exit_code: int
+    stdout: str
+    stderr: str
+    duration_s: float
+
+
+class TerraformRunner(Protocol):
+    async def run(
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout_s: float,
+    ) -> CompletedRun: ...
+
+
+class _AsyncSubprocessTerraformRunner:
+    """Default `TerraformRunner` — wraps `asyncio.create_subprocess_exec`."""
+
+    def __init__(self, binary: str) -> None:
+        self._binary = binary
+
+    async def run(
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout_s: float,
+    ) -> CompletedRun:
+        proc = await asyncio.create_subprocess_exec(
+            self._binary,
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            env=env,
+        )
+        t0 = time.monotonic()
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_s
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            try:
+                await proc.wait()
+            except Exception:  # pragma: no cover - best-effort cleanup
+                pass
+            raise
+        duration_s = time.monotonic() - t0
+        out = (
+            stdout_b.decode(errors="replace")
+            if stdout_b
+            else ""
+        )
+        err = (
+            stderr_b.decode(errors="replace")
+            if stderr_b
+            else ""
+        )
+        code = proc.returncode if proc.returncode is not None else -1
+        return CompletedRun(
+            exit_code=code, stdout=out, stderr=err, duration_s=duration_s
+        )
+
+
+def _default_env_provider() -> Mapping[str, str]:
+    """Shallow env slice for terraform — re-read DO token every call (never cache)."""
+    token = os.environ.get("DIGITALOCEAN_TOKEN", "").strip()
+    out: dict[str, str] = {
+        "TF_IN_AUTOMATION": "1",
+        "TF_INPUT": "0",
+    }
+    if token:
+        out["DIGITALOCEAN_TOKEN"] = token
+        out["TF_VAR_do_token"] = token
+    if "HOME" in os.environ:
+        out["HOME"] = os.environ["HOME"]
+    if "PATH" in os.environ:
+        out["PATH"] = os.environ["PATH"]
+    return out
+
+
+_DO_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"do_pat_[A-Za-z0-9]{64}"), "do_pat_<REDACTED>"),
+    (re.compile(r"do_v1_[A-Za-z0-9]{64}"), "do_v1_<REDACTED>"),
+    (re.compile(r"DIGITALOCEAN_TOKEN=\S+"), "DIGITALOCEAN_TOKEN=<REDACTED>"),
+    (re.compile(r'"token"\s*:\s*"[^"]+"'), '"token": "<REDACTED>"'),
+)
+
+
+def _scrub_secrets(text: str) -> str:
+    out = text
+    for pat, repl in _DO_SECRET_PATTERNS:
+        out = pat.sub(repl, out)
+    return out
+
+
+def _terraform_workspace_root() -> Path:
+    raw = os.environ.get("DIRIJOR_TERRAFORM_WORKSPACE_ROOT", "").strip()
+    if raw:
+        return Path(raw)
+    return Path(tempfile.gettempdir()) / "dirijor" / "terraform-workspaces"
+
+
+def _resolve_terraform_binary() -> str:
+    return os.environ.get("DIRIJOR_TERRAFORM_BINARY", "terraform").strip() or "terraform"
+
+
+class TerraformAdapter:
+    """Concrete DigitalOcean VPC provisioning via terraform CLI."""
+
+    name = "terraform-digitalocean"
+
+    def __init__(
+        self,
+        *,
+        workspace_root: Path,
+        binary: str = "terraform",
+        cmd_timeout_s: float = 300.0,
+        module_source: Path | None = None,
+        subprocess_runner: TerraformRunner | None = None,
+        env_provider: Callable[[], Mapping[str, str]] = _default_env_provider,
+    ) -> None:
+        self._workspace_root = workspace_root
+        self._binary = binary
+        raw_timeout = os.environ.get("DIRIJOR_TERRAFORM_CMD_TIMEOUT_S", "").strip()
+        if raw_timeout:
+            try:
+                self._cmd_timeout_s = float(raw_timeout)
+            except ValueError:
+                self._cmd_timeout_s = float(cmd_timeout_s)
+        else:
+            self._cmd_timeout_s = float(cmd_timeout_s)
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        self._module_source = module_source or (
+            repo_root / "terraform" / "modules" / "private-realm"
+        )
+        self._runner = subprocess_runner or _AsyncSubprocessTerraformRunner(binary)
+        self._env_provider = env_provider
+
+    def _ws_for(self, realm_id: str) -> Path:
+        ws = self._workspace_root / realm_id
+        ws.mkdir(parents=True, exist_ok=True)
+        return ws
+
+    def _copy_module(self, ws: Path) -> None:
+        if not self._module_source.is_dir():
+            raise SpinValidationError(
+                code="internal",
+                message=f"terraform module missing at {self._module_source}",
+                details={"path": str(self._module_source)},
+            )
+        # Flat copy — not a symlink — so destroy does not touch the repo tree.
+        for child in ws.iterdir():
+            if child.is_file() or child.is_symlink():
+                child.unlink(missing_ok=True)
+            elif child.is_dir():
+                shutil.rmtree(child)
+        shutil.copytree(
+            self._module_source, ws, dirs_exist_ok=True, symlinks=False
+        )
+
+    def _write_tfvars(self, ws: Path, req: SpinRequest, realm_id: str) -> None:
+        payload = {
+            "realm_name": realm_id,
+            "agent_count": req.agent_count,
+            "cloud_provider": "digitalocean",
+        }
+        tfvars_path = ws / "terraform.tfvars.json"
+        tfvars_path.write_text(
+            json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    def _merge_env(self) -> dict[str, str]:
+        base = dict(self._env_provider())
+        return {**dict(os.environ), **base}
+
+    async def _run_step(
+        self,
+        *,
+        job: SpinJob,
+        step: str,
+        args: list[str],
+        cwd: Path,
+        env: dict[str, str],
+    ) -> CompletedRun:
+        logger.info(
+            "realm.terraform.%s.start" % step,
+            extra={
+                "event": f"realm.terraform.{step}.start",
+                "job_id": job.job_id,
+                "realm_id": job.realm_id,
+                "step": step,
+            },
+        )
+        t0 = time.monotonic()
+        try:
+            run = await self._runner.run(
+                args,
+                cwd=cwd,
+                env=env,
+                timeout_s=self._cmd_timeout_s,
+            )
+        except asyncio.TimeoutError:
+            dur = time.monotonic() - t0
+            logger.info(
+                "realm.terraform.%s.done" % step,
+                extra={
+                    "event": f"realm.terraform.{step}.done",
+                    "job_id": job.job_id,
+                    "realm_id": job.realm_id,
+                    "step": step,
+                    "duration_s": round(dur, 3),
+                    "exit_code": -1,
+                },
+            )
+            raise SpinValidationError(
+                code="terraform_command_timeout",
+                message=f"terraform {step} exceeded {self._cmd_timeout_s}s timeout",
+                details={
+                    "step": step,
+                    "timeout_s": self._cmd_timeout_s,
+                },
+            ) from None
+
+        dur = time.monotonic() - t0
+        preview = _scrub_secrets(run.stderr[:500])
+        log_extra = {
+            "event": f"realm.terraform.{step}.done",
+            "job_id": job.job_id,
+            "realm_id": job.realm_id,
+            "step": step,
+            "duration_s": round(dur, 3),
+            "exit_code": run.exit_code,
+        }
+        if run.exit_code != 0:
+            log_extra["stderr_preview"] = preview
+        logger.info("realm.terraform.%s.done" % step, extra=log_extra)
+        return run
+
+    async def validate(self, req: SpinRequest) -> None:
+        token = os.environ.get("DIGITALOCEAN_TOKEN", "").strip()
+        if not token:
+            raise SpinValidationError(
+                code="adapter_credentials_missing",
+                message="DIGITALOCEAN_TOKEN is not set or empty",
+                details={},
+            )
+
+    async def provision(self, req: SpinRequest, job: SpinJob) -> dict[str, Any]:
+        await self.validate(req)
+        ws = self._ws_for(job.realm_id)
+        self._copy_module(ws)
+        self._write_tfvars(ws, req, job.realm_id)
+        env = self._merge_env()
+
+        r_init = await self._run_step(
+            job=job,
+            step="init",
+            args=["init", "-input=false", "-no-color"],
+            cwd=ws,
+            env=env,
+        )
+        if r_init.exit_code != 0:
+            prev = _scrub_secrets(r_init.stderr[:500])
+            raise SpinValidationError(
+                code="terraform_init_failed",
+                message=f"terraform init exited {r_init.exit_code} at step 'init'",
+                details={
+                    "step": "init",
+                    "exit_code": r_init.exit_code,
+                    "stderr_preview": prev,
+                },
+            )
+
+        r_val = await self._run_step(
+            job=job,
+            step="validate",
+            args=["validate", "-no-color"],
+            cwd=ws,
+            env=env,
+        )
+        if r_val.exit_code != 0:
+            prev = _scrub_secrets(r_val.stderr[:500])
+            raise SpinValidationError(
+                code="terraform_validate_failed",
+                message=f"terraform validate exited {r_val.exit_code} at step 'validate'",
+                details={
+                    "step": "validate",
+                    "exit_code": r_val.exit_code,
+                    "stderr_preview": prev,
+                },
+            )
+
+        r_plan = await self._run_step(
+            job=job,
+            step="plan",
+            args=[
+                "plan",
+                "-input=false",
+                "-no-color",
+                "-var-file=terraform.tfvars.json",
+                "-out=tfplan.binary",
+            ],
+            cwd=ws,
+            env=env,
+        )
+        if r_plan.exit_code != 0:
+            prev = _scrub_secrets(r_plan.stderr[:500])
+            raise SpinValidationError(
+                code="terraform_plan_failed",
+                message=f"terraform plan exited {r_plan.exit_code} at step 'plan'",
+                details={
+                    "step": "plan",
+                    "exit_code": r_plan.exit_code,
+                    "stderr_preview": prev,
+                },
+            )
+
+        r_apply = await self._run_step(
+            job=job,
+            step="apply",
+            args=[
+                "apply",
+                "-input=false",
+                "-auto-approve",
+                "-no-color",
+                "tfplan.binary",
+            ],
+            cwd=ws,
+            env=env,
+        )
+        if r_apply.exit_code != 0:
+            prev = _scrub_secrets(r_apply.stderr[:500])
+            raise SpinValidationError(
+                code="terraform_apply_failed",
+                message=(
+                    "partial apply — call DELETE /realms/"
+                    f"{job.job_id} to clean up"
+                ),
+                details={
+                    "step": "apply",
+                    "exit_code": r_apply.exit_code,
+                    "stderr_preview": prev,
+                    "partial_apply": True,
+                },
+            )
+
+        r_out = await self._run_step(
+            job=job,
+            step="output",
+            args=["output", "-json", "-no-color"],
+            cwd=ws,
+            env=env,
+        )
+        if r_out.exit_code != 0:
+            prev = _scrub_secrets(r_out.stderr[:500])
+            raise SpinValidationError(
+                code="terraform_apply_failed",
+                message=(
+                    "partial apply — call DELETE /realms/"
+                    f"{job.job_id} to clean up"
+                ),
+                details={
+                    "step": "apply",
+                    "exit_code": r_out.exit_code,
+                    "stderr_preview": prev,
+                    "partial_apply": True,
+                    "reason": "terraform_output_failed",
+                },
+            )
+
+        try:
+            raw_outputs: dict[str, Any] = json.loads(r_out.stdout)
+        except json.JSONDecodeError as exc:
+            raise SpinValidationError(
+                code="terraform_apply_failed",
+                message=f"terraform output JSON parse failed: {exc}",
+                details={
+                    "step": "apply",
+                    "reason": "terraform_output_malformed",
+                    "stderr_preview": _scrub_secrets(r_out.stderr[:500]),
+                },
+            ) from exc
+
+        vpc_block = raw_outputs.get("realm_vpc_id")
+        if not isinstance(vpc_block, dict) or "value" not in vpc_block:
+            raise SpinValidationError(
+                code="terraform_apply_failed",
+                message="terraform output missing realm_vpc_id.value",
+                details={
+                    "step": "apply",
+                    "reason": "terraform_output_malformed",
+                },
+            )
+
+        vpc_id = vpc_block["value"]
+        if not isinstance(vpc_id, str) or not vpc_id:
+            raise SpinValidationError(
+                code="terraform_apply_failed",
+                message="terraform output realm_vpc_id is unusable",
+                details={
+                    "step": "apply",
+                    "reason": "terraform_output_malformed",
+                },
+            )
+
+        ip_block = raw_outputs.get("realm_vpc_ip_range")
+        ip_val = None
+        if isinstance(ip_block, dict) and "value" in ip_block:
+            ip_val = ip_block["value"]
+
+        plan_path = ws / "tfplan.binary"
+        digest = ""
+        if plan_path.is_file():
+            h = hashlib.sha256(plan_path.read_bytes()).hexdigest()
+            digest = f"sha256:{h}"
+
+        return {
+            "adapter": self.name,
+            "agent_count": req.agent_count,
+            "realm_vpc_id": vpc_id,
+            "realm_vpc_ip_range": ip_val,
+            "mesh_endpoint": f"tf://{vpc_id}",
+            "tf_workspace": str(ws),
+            "tf_plan_digest": digest,
+        }
+
+    async def destroy(self, job: SpinJob) -> None:
+        ws_raw = job.outputs.get("tf_workspace")
+        if not ws_raw:
+            raise SpinValidationError(
+                code="terraform_destroy_failed",
+                message="job.outputs.tf_workspace missing — cannot destroy",
+                details={"step": "destroy"},
+            )
+        ws = Path(str(ws_raw)).resolve()
+        root = self._workspace_root.resolve()
+        if not ws.is_dir():
+            raise SpinValidationError(
+                code="terraform_destroy_failed",
+                message=f"workspace directory missing: {ws}",
+                details={"step": "destroy"},
+            )
+        if not ws.is_relative_to(root):
+            raise SpinValidationError(
+                code="terraform_destroy_failed",
+                message="job.outputs.tf_workspace escapes workspace root",
+                details={"step": "destroy", "workspace_root": str(root)},
+            )
+        env = self._merge_env()
+        run = await self._run_step(
+            job=job,
+            step="destroy",
+            args=["destroy", "-auto-approve", "-input=false", "-no-color"],
+            cwd=ws,
+            env=env,
+        )
+        if run.exit_code != 0:
+            prev = _scrub_secrets(run.stderr[:500])
+            raise SpinValidationError(
+                code="terraform_destroy_failed",
+                message=f"terraform destroy exited {run.exit_code}",
+                details={
+                    "step": "destroy",
+                    "exit_code": run.exit_code,
+                    "stderr_preview": prev,
+                },
+            )
+        keep = os.environ.get("DIRIJOR_TERRAFORM_KEEP_WORKSPACE_ON_DESTROY", "").strip()
+        if keep != "1":
+            try:
+                shutil.rmtree(ws)
+            except OSError as exc:
+                logger.warning(
+                    "realm.terraform.workspace_rmtree_failed",
+                    extra={
+                        "event": "realm.terraform.workspace_rmtree_failed",
+                        "path": str(ws),
+                        "exc_type": type(exc).__name__,
+                    },
+                )
+
+
+def _build_terraform_adapter() -> TerraformAdapter | None:
+    token = os.environ.get("DIGITALOCEAN_TOKEN", "").strip()
+    binary = _resolve_terraform_binary()
+    bin_path = Path(binary)
+    has_bin = shutil.which(binary) is not None or bin_path.is_file()
+    if not token:
+        logger.info(
+            "realm.terraform.adapter.skipped",
+            extra={"reason": "DIGITALOCEAN_TOKEN unset or empty"},
+        )
+        return None
+    if not has_bin:
+        logger.info(
+            "realm.terraform.adapter.skipped",
+            extra={"reason": f"terraform binary not found: {binary!r}"},
+        )
+        return None
+    adapter = TerraformAdapter(
+        workspace_root=_terraform_workspace_root(),
+        binary=binary,
+    )
+    logger.info(
+        "realm.terraform.adapter.registered",
+        extra={"adapter": adapter.name},
+    )
+    return adapter
+
+
+# Story 2.3 will wrap `.provision` with a default-deny egress policy decorator.
 _ADAPTERS: dict[str, RealmAdapter] = {
     LocalNoopAdapter.name: LocalNoopAdapter(),
 }
+
+_maybe_tf = _build_terraform_adapter()
+if _maybe_tf is not None:
+    _ADAPTERS[_maybe_tf.name] = _maybe_tf
 
 
 # --- Job registry + state machine -------------------------------------------
@@ -1040,6 +1621,8 @@ _JOB_BY_REALM: dict[str, str] = {}
 # handle is dropped. Storing every live task here keeps them alive; the
 # done-callback removes the entry so the set does not grow unboundedly.
 _RUNNING_SPIN_TASKS: set[asyncio.Task] = set()
+
+_RUNNING_DESTROY_TASKS: set[asyncio.Task] = set()
 
 
 def _mint_realm_id() -> str:
@@ -1092,6 +1675,29 @@ def _update_job(
     if outputs is not None:
         job.outputs = outputs
     return job
+
+
+def _mutate_outputs(
+    job: SpinJob,
+    *,
+    _remove_keys: frozenset[str] | None = None,
+    **kwargs: Any,
+) -> None:
+    """Merge keys into `job.outputs` for `phase == ready` jobs only.
+
+    Story 2.1 `_update_job` refuses terminal-phase mutation; destroy lifecycle
+    patches outputs without touching `phase`.
+    """
+    if job.phase != "ready":
+        raise RuntimeError(
+            f"_mutate_outputs: job {job.job_id} phase is {job.phase!r}, expected 'ready'"
+        )
+    merged: dict[str, Any] = {**job.outputs, **kwargs}
+    if _remove_keys:
+        for k in _remove_keys:
+            merged.pop(k, None)
+    job.outputs = merged
+    job.updated_at = _iso_now()
 
 
 def _log_job_done(
@@ -1164,7 +1770,20 @@ async def _run_spin_job(
         _update_job(job, phase="provisioning")
 
         error_source = "adapter.provision"
-        outputs = await adapter.provision(req, job)
+        try:
+            outputs = await adapter.provision(req, job)
+        except SpinValidationError as exc:
+            _update_job(
+                job,
+                phase="failed",
+                error=SpinError(
+                    code=exc.code,
+                    message=exc.message,
+                    details=exc.details,
+                ),
+            )
+            terminal_code = exc.code
+            return
         if not isinstance(outputs, dict):
             # Keep `error_source == "adapter.provision"` so the outer
             # `except` attributes this to the adapter (adapter_error),
@@ -1221,6 +1840,75 @@ async def _run_spin_job(
         # spin with the same realm_id is not permanently 409-locked.
         _JOB_BY_REALM.pop(job.realm_id, None)
         _log_job_done(job, started, terminal_code)
+
+
+# TODO(6.1): wrap `_run_destroy_job` in an OTel span once Story 6.1 lands.
+async def _run_destroy_job(job: SpinJob, adapter: RealmAdapter) -> None:
+    """Background destroy runner — keeps `phase == ready`; mutates outputs only."""
+    started = time.monotonic()
+    try:
+        await adapter.destroy(job)
+    except asyncio.CancelledError:
+        # Allow a subsequent DELETE to retry if the task was cancelled
+        # mid-flight (tests / cooperative shutdown).
+        _mutate_outputs(
+            job,
+            _remove_keys=frozenset({"destroy_requested_at"}),
+        )
+        raise
+    except SpinValidationError as exc:
+        _mutate_outputs(
+            job,
+            destroyed=False,
+            destroy_error={
+                "code": exc.code,
+                "message": exc.message,
+                "details": exc.details,
+            },
+        )
+        logger.warning(
+            "realm.spin.destroy_failed",
+            extra={
+                "event": "realm.spin.destroy_failed",
+                "job_id": job.job_id,
+                "realm_id": job.realm_id,
+                "duration_s": round(time.monotonic() - started, 3),
+                "code": exc.code,
+            },
+        )
+        return
+    except Exception as exc:
+        _mutate_outputs(
+            job,
+            destroyed=False,
+            destroy_error={
+                "code": "terraform_destroy_failed",
+                "message": str(exc),
+                "details": {"exc_type": type(exc).__name__},
+            },
+        )
+        logger.warning(
+            "realm.spin.destroy_failed",
+            extra={
+                "event": "realm.spin.destroy_failed",
+                "job_id": job.job_id,
+                "realm_id": job.realm_id,
+                "duration_s": round(time.monotonic() - started, 3),
+            },
+        )
+        return
+
+    destroyed_at = _iso_now()
+    _mutate_outputs(job, destroyed=True, destroyed_at=destroyed_at)
+    logger.info(
+        "realm.spin.destroyed",
+        extra={
+            "event": "realm.spin.destroyed",
+            "job_id": job.job_id,
+            "realm_id": job.realm_id,
+            "duration_s": round(time.monotonic() - started, 3),
+        },
+    )
 
 
 # --- HTTP routes -------------------------------------------------------------
@@ -1377,6 +2065,89 @@ async def get_realm_job(job_id: str) -> Any:
     return job
 
 
+@app.delete(
+    "/realms/{job_id}",
+    responses={
+        202: {
+            "model": SpinJob,
+            "description": "Destroy accepted; poll GET /realms/{job_id} for completion.",
+        },
+        204: {"description": "Already destroyed (idempotent no-op)."},
+        404: {"model": SpinError},
+        409: {"model": SpinError},
+    },
+)
+async def delete_realm_job_route(job_id: str) -> Any:
+    """Request asynchronous realm teardown; observe completion via GET poll."""
+    async with _destroy_route_gate(job_id):
+        job = _SPIN_JOBS.get(job_id)
+        if job is None:
+            return _spin_error_response(
+                404,
+                "job_not_found",
+                f"no spin job with id {job_id!r} is registered",
+                {"job_id": job_id},
+            )
+
+        if job.outputs.get("destroyed") is True:
+            return Response(status_code=204)
+
+        if job.phase != "ready":
+            return _spin_error_response(
+                409,
+                "destroy_invalid_state",
+                (
+                    f"job {job_id} phase {job.phase!r} is not destroyable "
+                    "(v0.2 requires phase='ready')"
+                ),
+                {"current_phase": job.phase},
+            )
+
+        if job.outputs.get("destroy_requested_at") and not job.outputs.get(
+            "destroyed"
+        ):
+            return _spin_error_response(
+                409,
+                "destroy_already_requested",
+                f"job {job_id} already has an active destroy task",
+                {"destroy_requested_at": job.outputs["destroy_requested_at"]},
+            )
+
+        adapter = _ADAPTERS.get(job.adapter)
+        if adapter is None:
+            return _spin_error_response(
+                500,
+                "internal",
+                f"adapter {job.adapter!r} is not registered (job registry drift)",
+                {"job_id": job_id, "adapter": job.adapter},
+            )
+
+        _mutate_outputs(
+            job,
+            destroy_requested_at=_iso_now(),
+            destroyed=False,
+        )
+
+        logger.info(
+            "realm.spin.destroy.accept",
+            extra={
+                "event": "realm.spin.destroy.accept",
+                "job_id": job.job_id,
+                "realm_id": job.realm_id,
+                "adapter": job.adapter,
+            },
+        )
+
+        task = asyncio.create_task(_run_destroy_job(job, adapter))
+        _RUNNING_DESTROY_TASKS.add(task)
+        task.add_done_callback(_RUNNING_DESTROY_TASKS.discard)
+
+        return JSONResponse(
+            status_code=202,
+            content=jsonable_encoder(job),
+        )
+
+
 # String-prefix match on request.url.path; scoped to the Story 2.1
 # endpoints so the Story 3.2 /consensus surface keeps its default
 # Pydantic 422 body (tests in that block rely on it).
@@ -1478,10 +2249,10 @@ async def _spin_validation_exception_handler(
 # — all outbound frames MUST go through the shared envelope / error path so
 # logging, eviction, and `seq` monotonicity stay consistent.
 #
-# TODO(refactor): supervisor.py > 1200 lines post-Story 2.1; split into
-# consensus.py + realtime.py + spin.py when Story 4.2 or 6.1 land. Do NOT
-# pre-split — a refactor mid-story adds risk; the split is a dedicated
-# follow-up.
+# TODO(refactor): supervisor.py > 2000 lines post-Story 2.2; split into
+# consensus.py + realtime.py + spin.py + terraform_adapter.py when Story 4.2
+# or 6.1 land. Do NOT pre-split — a refactor mid-story adds risk; the split
+# is a dedicated follow-up.
 
 
 class RealtimeEnvelope(BaseModel):

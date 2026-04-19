@@ -30,7 +30,7 @@ v0.1 supervisor exposes — no opinions, no recommendations. For the
 | Field | Value | Meaning |
 |---|---|---|
 | `SERVICE_VERSION` | `"0.1.0"` | Module constant; `FastAPI(version=...)` and every response read this. |
-| `SCHEMA_VERSION` | `3` | Contract shape version. Bumps on **additive** change too so clients can detect feature availability; breaking changes require a **major** bump. Story 3.2 bumped 1→2 (debate loop), Story 3.3 bumped 2→3 (WebSocket channel + `realtime` block). Story 2.1 (2026-04-18) added the `realm_manager` readiness-registry dep **without** bumping — precedent for "dep-only additive" extensions: adding a new readiness-registry dependency does NOT bump `SCHEMA_VERSION`. |
+| `SCHEMA_VERSION` | `4` | Contract shape version. Story 2.2 bumped 3→4 (`DELETE /realms/{job_id}` + destroy-related `outputs` keys + nine new `SpinError.code` values). Story 3.2 bumped 1→2 (debate loop), Story 3.3 bumped 2→3 (WebSocket channel + `realtime` block). Story 2.1 added the `realm_manager` readiness-registry dep without bumping — precedent for "dep-only additive" extensions. |
 
 ## Endpoints at a glance
 
@@ -41,6 +41,7 @@ v0.1 supervisor exposes — no opinions, no recommendations. For the
 | `POST` | `/consensus`                  | Multi-agent debate loop (Story 3.2 — real, configurable threshold)    | `200` / `503` (if graph unavailable) |
 | `POST` | `/realms/spin`                | Enqueue a realm provisioning job (Story 2.1 — adapter-backed, async)  | `202` / `400` / `409` / `503` |
 | `GET`  | `/realms/{job_id}`            | Poll spin job state (Story 2.1 — `validating → provisioning → ready \| failed`) | `200` / `404` |
+| `DELETE` | `/realms/{job_id}`          | Request realm destroy (Story 2.2 — adapter-scoped; poll `GET` for completion) | `202` / `204` / `404` / `409` / `500` |
 | `WS`   | `/ws/realm/{realm_id}`        | Live topology / metrics / HITL events for the Private Realm canvas    | accept `101` / close `4401`, `4403`, `1011` |
 
 The Docker image ships a stdlib `HEALTHCHECK` that calls `GET /health`
@@ -93,7 +94,7 @@ Pydantic model: `RootStatus`.
 {
   "service": "dirijor-supervisor",
   "version": "0.1.0",
-  "schema_version": 3,
+  "schema_version": 4,
   "status": "operational",
   "consensus_engine": "ready",
   "uptime_s": 12.4,
@@ -142,7 +143,7 @@ Pydantic model: `HealthStatus`.
 {
   "status": "ok",
   "version": "0.1.0",
-  "schema_version": 3,
+  "schema_version": 4,
   "uptime_s": 12.4,
   "timestamp": "2026-04-16T10:12:44.117Z",
   "checks": {
@@ -166,7 +167,7 @@ status code and `status` field differ.
 {
   "status": "degraded",
   "version": "0.1.0",
-  "schema_version": 3,
+  "schema_version": 4,
   "uptime_s": 342.0,
   "timestamp": "2026-04-16T10:18:02.554Z",
   "checks": {
@@ -299,7 +300,7 @@ Pydantic model: `SpinResponse`.
   "adapter":         "local-noop",
   "created_at":      "2026-04-18T10:12:44.117Z",
   "status_url":      "/realms/5f1c0b2e-3d4a-4f5b-8c7d-9e0a1b2c3d4e",
-  "schema_version":  3
+  "schema_version":  4
 }
 ```
 
@@ -334,6 +335,25 @@ additive change and requires updating this page in the same PR.
 | `job_not_found`              | `404` | `GET /realms/{job_id}` with an unknown id. |
 | `adapter_error`              | _on job surface_ | Adapter raised; surfaces as terminal `phase: "failed"` + populated `error` on `GET /realms/{job_id}`. `details.exc_type` names the exception class; `details.traceback_preview` carries the last 500 chars of the traceback. |
 | `internal`                   | _on job surface_ | Defensive catch-all at the top of `_run_spin_job`. Same surface as `adapter_error`. |
+| `terraform_init_failed`      | _on job surface_ | `terraform init` non-zero; `details.step`, `details.exit_code`, `details.stderr_preview` (scrubbed). |
+| `terraform_validate_failed`  | _on job surface_ | `terraform validate` non-zero. |
+| `terraform_plan_failed`      | _on job surface_ | `terraform plan` non-zero. |
+| `terraform_apply_failed`     | _on job surface_ | `terraform apply` non-zero or malformed `terraform output -json` after apply; may include `details.partial_apply`. `details.reason` is `terraform_output_malformed` (bad JSON / missing `realm_vpc_id`) or `terraform_output_failed` (non-zero `terraform output` exit after successful apply). |
+| `terraform_destroy_failed`   | _on job surface_ / nested in `outputs.destroy_error` | `terraform destroy` non-zero on the DELETE path. |
+| `terraform_command_timeout`  | _on job surface_ | Subprocess exceeded `DIRIJOR_TERRAFORM_CMD_TIMEOUT_S`. |
+| `adapter_credentials_missing`| _on job surface_ | `DIGITALOCEAN_TOKEN` missing at validate time. |
+| `destroy_invalid_state`      | `409` | `DELETE` when `phase != "ready"`. `details.current_phase`. |
+| `destroy_already_requested`  | `409` | Second `DELETE` while destroy is in flight. `details.destroy_requested_at`. |
+
+### Adapter: `terraform-digitalocean`
+
+When registered at process start (requires non-empty **`DIGITALOCEAN_TOKEN`**
+and a terraform binary on **`PATH`** or at **`DIRIJOR_TERRAFORM_BINARY`**),
+`adapter_hint: "terraform-digitalocean"` runs `terraform init → validate →
+plan → apply` in a per-realm workspace under **`DIRIJOR_TERRAFORM_WORKSPACE_ROOT`**
+(default: `<temp>/dirijor/terraform-workspaces/<realm_id>/`). Ready
+`outputs` include `realm_vpc_id`, `realm_vpc_ip_range`, `mesh_endpoint`
+(`tf://<vpc_id>` placeholder until Story 5.1), `tf_workspace`, `tf_plan_digest`.
 
 Worked examples:
 
@@ -393,7 +413,7 @@ Pydantic model: `SpinJob`.
     "agent_count":   3
   },
   "error":          null,
-  "schema_version": 3
+  "schema_version": 4
 }
 ```
 
@@ -444,6 +464,32 @@ for i in $(seq 1 20); do
   sleep 0.2
 done
 ```
+
+---
+
+## `DELETE /realms/{job_id}`
+
+**Purpose.** Request asynchronous teardown of a **ready** realm job (Story
+2.2). Destroy lifecycle state lives in `SpinJob.outputs` (`destroy_requested_at`,
+`destroyed`, `destroyed_at`, `destroy_error`) — `phase` stays `ready` until
+future stories change the contract.
+
+### Responses
+
+| Code | Body |
+|---|---|
+| `202` | Current `SpinJob` with `outputs.destroy_requested_at` set. |
+| `204` | Empty — job already destroyed (idempotent retry). |
+| `404` | `job_not_found` |
+| `409` | `destroy_invalid_state` or `destroy_already_requested` |
+| `500` | `internal` — defensive: stored `job.adapter` not present in the in-process registry (should not occur in normal operation). |
+
+```bash
+curl -s -X DELETE http://localhost:8000/realms/$JOB
+```
+
+Poll `GET /realms/{job_id}` until `outputs.destroyed == true` or
+`outputs.destroy_error` is populated.
 
 ---
 
@@ -571,9 +617,10 @@ Tests cover:
 - `test_health_ok_when_ready`, `test_health_503_when_required_dep_degraded`, `test_health_never_500s_when_probe_raises`, `test_health_includes_realtime_channel_dep`
 - `test_registry_contains_required_dependencies`
 - `test_consensus_smoke`, `test_consensus_degraded_keeps_v01_key_set`
-- `test_schema_version_pinned`, `test_schema_version_is_3` (fail loudly if someone bumps `SCHEMA_VERSION` without updating this page)
+- `test_schema_version_pinned`, `test_schema_version_is_4` (fail loudly if someone bumps `SCHEMA_VERSION` without updating this page)
 - Story 3.3 WebSocket suite: `test_ws_accepts_valid_realm_id`, `test_ws_rejects_missing_realm_id`, `test_ws_rejects_malformed_realm_id`, `test_ws_rejects_forbidden_realm`, `test_ws_broadcast_reaches_only_matching_realm`, `test_ws_heartbeat_emitted_on_idle`, `test_ws_disconnect_cleans_up_registry`, `test_ws_close_1011_on_send_failure`
-- Story 2.1 realm-spin suite: `test_spin_accepts_valid_request_returns_202`, `test_spin_echoes_caller_provided_realm_id`, `test_spin_generates_realm_id_when_absent`, `test_spin_rejects_empty_description`, `test_spin_rejects_oversized_description`, `test_spin_rejects_invalid_realm_id`, `test_spin_rejects_unknown_adapter`, `test_spin_rejects_conflict_on_active_realm`, `test_spin_job_progresses_through_lifecycle`, `test_spin_failure_surfaces_structured_error`, `test_get_realm_job_404_on_unknown_id`, `test_health_includes_realm_manager_dep`, `test_schema_version_still_3`
+- Story 2.1 realm-spin suite: `test_spin_accepts_valid_request_returns_202`, `test_spin_echoes_caller_provided_realm_id`, `test_spin_generates_realm_id_when_absent`, `test_spin_rejects_empty_description`, `test_spin_rejects_oversized_description`, `test_spin_rejects_invalid_realm_id`, `test_spin_rejects_unknown_adapter`, `test_spin_rejects_conflict_on_active_realm`, `test_spin_job_progresses_through_lifecycle`, `test_spin_failure_surfaces_structured_error`, `test_get_realm_job_404_on_unknown_id`, `test_health_includes_realm_manager_dep`
+- Story 2.2 terraform + destroy suite (20 cases): `test_terraform_adapter_registered_when_token_and_binary_present`, `test_terraform_adapter_skipped_when_token_absent`, `test_terraform_adapter_skipped_when_binary_missing`, `test_spin_terraform_adapter_accepts_and_returns_202`, `test_spin_terraform_lifecycle_progresses_to_ready`, `test_spin_terraform_invokes_commands_in_order`, `test_spin_terraform_init_failure_surfaces_terraform_init_failed`, `test_spin_terraform_validate_failure_surfaces_terraform_validate_failed`, `test_spin_terraform_plan_failure_surfaces_terraform_plan_failed`, `test_spin_terraform_apply_failure_surfaces_terraform_apply_failed`, `test_spin_terraform_apply_failure_scrubs_do_pat_tokens`, `test_spin_terraform_command_timeout_surfaces_terraform_command_timeout`, `test_spin_terraform_credentials_missing_at_validate_time_surfaces_adapter_credentials_missing`, `test_destroy_on_ready_job_returns_202_and_runs_terraform_destroy`, `test_destroy_on_non_ready_job_returns_409_destroy_invalid_state`, `test_destroy_idempotent_on_already_destroyed_returns_204`, `test_delete_realm_job_404_on_unknown_id`, `test_schema_version_is_4`, `test_scrub_secrets_masks_all_documented_patterns`, `test_local_noop_destroy_is_idempotent_noop`
 
 If any test fails, **this reference is out of date** — file a docs PR
 before merging the code PR that changed the contract.

@@ -120,8 +120,7 @@ Firecracker (Story 5.3 explicit).
 
 **Bindings today (v0.1).**
 
-- `POST /realms/spin` + `GET /realms/{job_id}` HTTP contract + `RealmAdapter` seam shipped (Story 2.1); `LocalNoopAdapter` is the only adapter in v0.1.
-- Terraform adapter v0 lands in Story 2.2 behind the same contract; docker-compose + baseline Terraform stub already exist in the repo.
+- `POST /realms/spin` + `DELETE /realms/{job_id}` + `GET /realms/{job_id}` with the `terraform-digitalocean` adapter available when **`DIGITALOCEAN_TOKEN`** and a terraform binary are configured (Story 2.2, 2026-04-18); Story 2.3 adds the default-deny egress decorator; Story 5.1 consumes `outputs.mesh_endpoint`.
 - Mesh bootstrap automation: Story 5.1 (consumes `SpinJob.outputs.mesh_endpoint`).
 - Default-deny egress at provision time: Story 2.3 (wraps `RealmAdapter.provision`).
 - Firecracker lifecycle: Story 5.3 (may trail MVP).

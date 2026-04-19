@@ -203,11 +203,9 @@ Story 2.1 adds the async realm-spin HTTP contract — the canvas "Spin realm"
 button now round-trips through the supervisor instead of a client-side
 `setTimeout` stub. The endpoint pair follows the same stability discipline
 as `/consensus` and `/ws`: closed `SpinError.code` enum, `ConfigDict(extra="forbid")`
-on every Pydantic model, additive-only response shapes. Adding the
-`realm_manager` readiness dep did **not** bump `SCHEMA_VERSION` (still `3`)
-— see the stability-policy row in
-[`docs/reference/supervisor-api.md`](docs/reference/supervisor-api.md) for
-the "dep-only additive" precedent.
+on every Pydantic model, additive-only response shapes. Story 2.2 bumped
+`SCHEMA_VERSION` to `4` for the destroy route + expanded enum — see
+[`docs/reference/supervisor-api.md`](docs/reference/supervisor-api.md).
 
 - **`POST /realms/spin`** — enqueue a job. Accepts
   `{ realm_description, adapter_hint?, realm_id?, agent_count? }`; returns
@@ -220,16 +218,38 @@ the "dep-only additive" precedent.
   Unknown ids → `404 job_not_found`.
 - **Adapter abstraction.** v0.1 ships `LocalNoopAdapter` (simulates
   provisioning with `PROVISION_DELAY_S = 0.5s`, returns
-  `mesh_endpoint: noop://<realm_id>`). Story 2.2 registers `TerraformAdapter`
-  behind the same `RealmAdapter` `Protocol`; Story 2.3 wraps `.provision`
+  `mesh_endpoint: noop://<realm_id>` **(local-noop)**). Story 2.2 registers
+  `TerraformAdapter` behind the same `RealmAdapter` `Protocol`; Story 2.3 wraps `.provision`
   with default-deny egress.
 
 ```bash
-# Smoke: spin + poll
+# Smoke: spin + poll (local-noop — noop:// mesh endpoint)
 JOB=$(curl -s -X POST http://localhost:8000/realms/spin \
   -H 'Content-Type: application/json' \
   -d '{"realm_description":"smoke test","agent_count":3}' | jq -r .job_id)
 curl -s http://localhost:8000/realms/$JOB | jq
+```
+
+### Terraform adapter (Story 2.2)
+
+When **`DIGITALOCEAN_TOKEN`** is set to a non-empty value and a **`terraform`**
+binary is on `PATH` (or **`DIRIJOR_TERRAFORM_BINARY`** points at an existing
+executable), Core registers **`terraform-digitalocean`** and provisions a
+DigitalOcean VPC via `terraform/modules/private-realm/`. The default Docker
+image does **not** include Terraform — operators who need this path install
+Terraform in a custom image layer or run the supervisor on the host.
+
+```bash
+export DIGITALOCEAN_TOKEN='<replace-with-your-DO-personal-access-token>'
+export DIRIJOR_TERRAFORM_BINARY=/usr/local/bin/terraform   # optional if `terraform` is on PATH
+
+JOB=$(curl -s -X POST http://localhost:8000/realms/spin \
+  -H 'Content-Type: application/json' \
+  -d '{"realm_description":"terraform smoke","adapter_hint":"terraform-digitalocean","agent_count":3}' | jq -r .job_id)
+curl -s http://localhost:8000/realms/$JOB | jq
+
+curl -s -X DELETE http://localhost:8000/realms/$JOB
+# Poll GET until outputs.destroyed == true
 ```
 
 Frontend wiring: set `NEXT_PUBLIC_DIRIJOR_API_URL` to the supervisor base

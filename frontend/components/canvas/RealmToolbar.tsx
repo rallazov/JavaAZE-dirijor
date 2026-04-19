@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
 'use client';
 
+import { useEffect, useState } from 'react';
 import { ChevronDown, Loader2, PanelRight, PanelRightClose, RotateCcw, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -26,7 +27,25 @@ export function RealmToolbar({ className }: { className?: string }) {
   const inspectorOpen = useCanvasStore((s) => s.inspectorOpen);
   const toggleInspector = useCanvasStore((s) => s.toggleInspector);
   const resetGraphToDemo = useCanvasStore((s) => s.resetGraphToDemo);
-  const { phase, spinPrivateRealm, jobId, realmId, error } = useRealmSpin();
+  const {
+    phase,
+    spinPrivateRealm,
+    destroyPrivateRealm,
+    jobId,
+    realmId,
+    error,
+    destroying,
+    destroyed,
+    outputs,
+  } = useRealmSpin();
+
+  const [destroyArmed, setDestroyArmed] = useState(false);
+
+  useEffect(() => {
+    if (!destroyArmed) return;
+    const id = setTimeout(() => setDestroyArmed(false), 3000);
+    return () => clearTimeout(id);
+  }, [destroyArmed]);
 
   return (
     <TooltipProvider>
@@ -163,12 +182,50 @@ export function RealmToolbar({ className }: { className?: string }) {
             </TooltipContent>
           </Tooltip>
         </div>
-        {jobId && phase === 'ready' && (
+        {jobId && phase === 'ready' && !destroyed && (
+          <div className="basis-full flex flex-wrap items-center justify-end gap-2 md:basis-auto">
+            <p className="text-right font-mono text-[10px] text-realm-emerald">
+              Job {jobId} · realm {realmId ?? '—'} · ready for mesh attach
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="shrink-0 border-white/15 text-xs text-zinc-400 hover:text-zinc-200"
+              disabled={destroying}
+              aria-busy={destroying}
+              onClick={() => {
+                if (destroyArmed) {
+                  setDestroyArmed(false);
+                  void destroyPrivateRealm();
+                  return;
+                }
+                setDestroyArmed(true);
+              }}
+            >
+              {destroying ? (
+                <>
+                  <Loader2 className="mr-1 inline size-3.5 animate-spin" aria-hidden />
+                  Destroying…
+                </>
+              ) : destroyArmed ? (
+                'Click again to destroy'
+              ) : (
+                'Destroy realm'
+              )}
+            </Button>
+          </div>
+        )}
+        {jobId && phase === 'ready' && destroyed && (
           <p
-            className="basis-full text-right font-mono text-[10px] text-realm-emerald md:basis-auto"
+            className="basis-full text-right font-mono text-[10px] text-realm-muted md:basis-auto"
             role="status"
           >
-            Job {jobId} · realm {realmId ?? '—'} · ready for mesh attach
+            Realm {realmId ?? '—'} destroyed (
+            {typeof outputs?.destroyed_at === 'string'
+              ? outputs.destroyed_at
+              : '—'}
+            ). Job {jobId} retained for audit.
           </p>
         )}
         {phase === 'failed' && error && (
