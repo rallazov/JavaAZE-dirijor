@@ -49,9 +49,11 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hashlib
 import json
 import logging
+import math
 from contextlib import asynccontextmanager
 import os
 import re
@@ -63,14 +65,24 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping, Protocol, Sequence, TypedDict, get_args
+from typing import Any, Callable, Literal, Mapping, Protocol, Self, Sequence, TypedDict, get_args
 
-from fastapi import Body, FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from langgraph.graph import END, StateGraph
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from qdrant_client import AsyncQdrantClient
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchValue,
+    PointStruct,
+    VectorParams,
+)
 
 logger = logging.getLogger("dirijor.supervisor")
 
@@ -94,7 +106,13 @@ SERVICE_VERSION = "0.1.0"
 # (new top-level surface -> bump).
 # Story 2.3 (2026-04-19) adds `egress_policy_denied` and Terraform egress
 # module fields without bumping SCHEMA_VERSION (env + tfvars only — ADR-0004).
-SCHEMA_VERSION = 4
+#   v5 (Story 4.1, 2026-04-19) — Verified semantic cache (Qdrant): new
+#     `POST /semantic-cache/ingest` + `POST /semantic-cache/query`;
+#     optional `ConsensusRequest` fields `query_vector`, `semantic_scope_id`,
+#     `semantic_cache_limit`, `semantic_cache_threshold`; `verified_facts` on
+#     `/consensus` 200 populated from cache hits; live `semantic_cache`
+#     readiness probe (still `required: false`).
+SCHEMA_VERSION = 5
 STARTED_AT = time.monotonic()
 STARTUP_GRACE_S = 1.0
 
@@ -155,6 +173,100 @@ class ConsensusVote(AgentOpinion):
     round: int = Field(ge=1)
 
 
+class VerifiedFact(BaseModel):
+    """One retrieved verified fact from the semantic cache (Story 4.1)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    fact_id: str
+    provenance_id: str
+    source_uri: str
+    snippet: str
+    score: float
+    metadata: dict[str, Any]
+
+
+class SemanticCacheIngestRequest(BaseModel):
+    """`POST /semantic-cache/ingest` body — caller supplies the embedding vector."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    fact_id: str | None = None
+    scope_id: str
+    provenance_id: str
+    source_uri: str = ""
+    verified_by: str
+    text: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    vector: list[float]
+
+    @field_validator(
+        "scope_id", "provenance_id", "verified_by", "text", mode="before"
+    )
+    @classmethod
+    def _non_blank_str(cls, v: Any) -> str:
+        if v is None or (isinstance(v, str) and not str(v).strip()):
+            raise ValueError("must be a non-blank string")
+        return str(v).strip()
+
+    @field_validator("vector")
+    @classmethod
+    def _vector_nonempty_finite(cls, v: list[float]) -> list[float]:
+        if not v:
+            raise ValueError("vector must be non-empty")
+        for x in v:
+            if not isinstance(x, (int, float)) or not math.isfinite(float(x)):
+                raise ValueError("vector must contain only finite floats")
+        return [float(x) for x in v]
+
+
+class SemanticCacheIngestResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fact_id: str
+    scope_id: str
+    provenance_id: str
+    collection: str
+    schema_version: int
+
+
+class SemanticCacheQueryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(
+        default="",
+        description="Does not affect vector similarity search; optional text for operators, logs, and future hybrid retrieval.",
+    )
+    query_vector: list[float]
+    scope_id: str
+    limit: int = Field(default=5, ge=1, le=20)
+    score_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+
+    @field_validator("scope_id", mode="before")
+    @classmethod
+    def _scope_non_blank(cls, v: Any) -> str:
+        if v is None or (isinstance(v, str) and not str(v).strip()):
+            raise ValueError("scope_id must be a non-blank string")
+        return str(v).strip()
+
+    @field_validator("query_vector")
+    @classmethod
+    def _qv_finite(cls, v: list[float]) -> list[float]:
+        if not v:
+            raise ValueError("query_vector must be non-empty")
+        for x in v:
+            if not isinstance(x, (int, float)) or not math.isfinite(float(x)):
+                raise ValueError("query_vector must contain only finite floats")
+        return [float(x) for x in v]
+
+
+class SemanticCacheQueryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    hits: list[VerifiedFact]
+    schema_version: int
+
+
 class ConsensusRequest(BaseModel):
     """`POST /consensus` request body — all fields optional.
 
@@ -168,6 +280,34 @@ class ConsensusRequest(BaseModel):
     opinions: list[AgentOpinion] = Field(default_factory=list)
     max_rounds: int = Field(default=DEFAULT_MAX_ROUNDS, ge=1, le=10)
     threshold: float = Field(default=DEFAULT_THRESHOLD, ge=0.0, le=1.0)
+    query_vector: list[float] | None = None
+    semantic_scope_id: str = ""
+    semantic_cache_limit: int = Field(default=5, ge=1, le=20)
+    semantic_cache_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+
+    @field_validator("query_vector")
+    @classmethod
+    def _consensus_qv_finite(cls, v: list[float] | None) -> list[float] | None:
+        if v is None:
+            return None
+        for x in v:
+            if not isinstance(x, (int, float)) or not math.isfinite(float(x)):
+                raise ValueError("query_vector must contain only finite floats")
+        return [float(x) for x in v]
+
+    @model_validator(mode="after")
+    def _scope_required_when_query_vector(self) -> Self:
+        # Story 4.1 + code review (decision B): no implicit shared scope — callers
+        # must name an isolation boundary whenever they send an embedding.
+        if self.query_vector:
+            if not str(self.semantic_scope_id).strip():
+                raise ValueError(
+                    "semantic_scope_id must be a non-empty string when query_vector is provided"
+                )
+        return self
+
+
+SemanticCacheOutcomeStatus = Literal["hit", "miss", "skipped", "unavailable", "disabled"]
 
 
 class ConsensusResult(BaseModel):
@@ -177,7 +317,9 @@ class ConsensusResult(BaseModel):
       - `messages` — list containing the query echoed (empty list when no query).
       - `consensus_score` — **real** final-round quorum score in `[0.0, 1.0]`.
         `1.0` for a single opinion, `0.0` for zero opinions.
-      - `verified_facts` — reserved for Qdrant wiring in Story 4.1; currently `[]`.
+      - `verified_facts` — verified semantic-cache hits attached **before** the
+        debate loop when `query_vector` + `semantic_scope_id` are supplied and
+        Qdrant returns passing scores; otherwise `[]` (see `semantic_cache_*`).
 
     v2 additive keys (AC 5):
       - `decision` — the agreed opinion text, or `null` when threshold was not
@@ -187,16 +329,67 @@ class ConsensusResult(BaseModel):
         `single_opinion_shortcut`, `no_opinions`.
       - `rounds` — how many rounds actually ran (≥ 1).
       - `threshold` — echo of the effective threshold for this request.
+
+    Story 4.1 additive (HTTP 200 only):
+      - `semantic_cache_status` — outcome of the pre-consensus cache lookup.
+      - `semantic_cache_reason` — closed-set detail when not a hit (`null` on hit).
     """
 
     messages: list[str]
     consensus_score: float
-    verified_facts: list
+    verified_facts: list[VerifiedFact]
     decision: str | None
     votes: list[ConsensusVote]
     termination_reason: str
     rounds: int = Field(ge=1)
     threshold: float = Field(ge=0.0, le=1.0)
+    semantic_cache_status: SemanticCacheOutcomeStatus
+    semantic_cache_reason: str | None = None
+
+
+# Namespace for uuid5(scope_id, fact_id) → Qdrant point id (avoids cross-realm collision).
+_SEMANTIC_POINT_NS = uuid.UUID("381df00d-3cf0-5622-a7f2-33b58b783daf")
+
+
+def _qdrant_point_id(scope_id: str, fact_id: str) -> str:
+    key = f"{scope_id.strip()}\x1e{fact_id.strip()}"
+    return str(uuid.uuid5(_SEMANTIC_POINT_NS, key))
+
+
+def _classify_semantic_cache_exception(exc: BaseException) -> str:
+    """Map client/network failures to a small reason vocabulary (Story 4.1 AC)."""
+    name = type(exc).__name__.lower()
+    msg = str(exc).lower()
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) or "timeout" in name:
+        return "qdrant_timeout"
+    if "cancelled" in name:
+        return "qdrant_timeout"
+    if "401" in msg or "403" in msg or "unauthorized" in msg or "forbidden" in msg:
+        return "qdrant_auth"
+    if (
+        "connection" in name
+        or "connection" in msg
+        or "connect" in msg
+        or "refused" in msg
+        or "gaierror" in name
+        or "name or service not known" in msg
+    ):
+        return "qdrant_connection"
+    return "qdrant_unavailable"
+
+
+def _consensus_semantic_cache_meta(
+    miss_reason: str | None,
+) -> tuple[SemanticCacheOutcomeStatus, str | None]:
+    if miss_reason is None:
+        return "hit", None
+    if miss_reason == "query_vector_missing":
+        return "skipped", "query_vector_missing"
+    if miss_reason == "disabled":
+        return "disabled", "disabled"
+    if miss_reason.startswith("qdrant_"):
+        return "unavailable", miss_reason
+    return "miss", miss_reason
 
 
 # --- LangGraph consensus workflow -------------------------------------------
@@ -352,6 +545,340 @@ except Exception as exc:  # pragma: no cover - defensive, should not trigger in 
     logger.exception("LangGraph workflow failed to compile; /health will report degraded")
 
 
+# --- Verified semantic cache (Story 4.1, Qdrant) ------------------------------
+#
+# Hermetic tests monkeypatch `_SEMANTIC_CACHE` — no live Qdrant in CI.
+
+
+@dataclass
+class SemanticCacheSettings:
+    """Resolved once at import from env (side-effect-light)."""
+
+    mode: Literal["disabled", "misconfigured", "qdrant"]
+    url: str | None = None
+    api_key: str | None = None
+    collection: str = "dirijor_verified_facts"
+    vector_size: int = 384
+    default_score_threshold: float = 0.78
+    misconfigured_detail: str | None = None
+
+
+def _load_semantic_cache_settings() -> SemanticCacheSettings:
+    url = (os.getenv("QDRANT_URL") or "").strip()
+    if not url:
+        return SemanticCacheSettings(mode="disabled")
+    api_key = (os.getenv("QDRANT_API_KEY") or "").strip() or None
+    collection = (os.getenv("QDRANT_COLLECTION") or "dirijor_verified_facts").strip()
+    if not collection:
+        collection = "dirijor_verified_facts"
+    try:
+        vector_size = int((os.getenv("QDRANT_VECTOR_SIZE") or "384").strip())
+        if vector_size <= 0:
+            raise ValueError
+    except ValueError:
+        return SemanticCacheSettings(
+            mode="misconfigured",
+            misconfigured_detail="invalid QDRANT_VECTOR_SIZE",
+        )
+    try:
+        thr = float((os.getenv("QDRANT_SCORE_THRESHOLD") or "0.78").strip())
+        if not math.isfinite(thr) or thr < 0.0 or thr > 1.0:
+            raise ValueError
+    except ValueError:
+        return SemanticCacheSettings(
+            mode="misconfigured",
+            misconfigured_detail="invalid QDRANT_SCORE_THRESHOLD",
+        )
+    return SemanticCacheSettings(
+        mode="qdrant",
+        url=url,
+        api_key=api_key,
+        collection=collection,
+        vector_size=vector_size,
+        default_score_threshold=thr,
+    )
+
+
+_SEMANTIC_SETTINGS: SemanticCacheSettings = _load_semantic_cache_settings()
+
+
+class SemanticCacheBackend(Protocol):
+    async def ready(self) -> tuple[bool, str | None]: ...
+
+    async def ingest(self, req: SemanticCacheIngestRequest) -> SemanticCacheIngestResponse: ...
+
+    async def query(self, req: SemanticCacheQueryRequest) -> list[VerifiedFact]: ...
+
+    async def consensus_fetch(
+        self, req: ConsensusRequest
+    ) -> tuple[list[VerifiedFact], str | None]: ...
+
+
+class _DisabledSemanticCache:
+    async def ready(self) -> tuple[bool, str | None]:
+        return False, "not configured"
+
+    async def ingest(self, req: SemanticCacheIngestRequest) -> SemanticCacheIngestResponse:
+        raise RuntimeError("semantic cache disabled")
+
+    async def query(self, req: SemanticCacheQueryRequest) -> list[VerifiedFact]:
+        raise RuntimeError("semantic cache disabled")
+
+    async def consensus_fetch(
+        self, req: ConsensusRequest
+    ) -> tuple[list[VerifiedFact], str | None]:
+        if not req.query_vector:
+            return [], "query_vector_missing"
+        if not str(req.semantic_scope_id).strip():
+            return [], "scope_empty"
+        return [], "disabled"
+
+
+class _MisconfiguredSemanticCache:
+    def __init__(self, detail: str) -> None:
+        self._detail = detail
+
+    async def ready(self) -> tuple[bool, str | None]:
+        return False, self._detail
+
+    async def ingest(self, req: SemanticCacheIngestRequest) -> SemanticCacheIngestResponse:
+        raise RuntimeError(self._detail)
+
+    async def query(self, req: SemanticCacheQueryRequest) -> list[VerifiedFact]:
+        raise RuntimeError(self._detail)
+
+    async def consensus_fetch(
+        self, req: ConsensusRequest
+    ) -> tuple[list[VerifiedFact], str | None]:
+        if not req.query_vector:
+            return [], "query_vector_missing"
+        if not str(req.semantic_scope_id).strip():
+            return [], "scope_empty"
+        return [], "qdrant_unavailable"
+
+
+class _QdrantSemanticCache:
+    def __init__(self, settings: SemanticCacheSettings) -> None:
+        self._s = settings
+        self._client: AsyncQdrantClient | None = None
+
+    def _client_sync_create(self) -> AsyncQdrantClient:
+        # API key must never be logged — pass only into the client constructor.
+        return AsyncQdrantClient(
+            url=self._s.url or "",
+            api_key=self._s.api_key,
+            timeout=10,
+        )
+
+    async def _client_async(self) -> AsyncQdrantClient:
+        if self._client is None:
+            self._client = self._client_sync_create()
+        return self._client
+
+    async def _ensure_collection(self, client: AsyncQdrantClient) -> None:
+        col = self._s.collection
+        if await client.collection_exists(col):
+            return
+        await client.create_collection(
+            collection_name=col,
+            vectors_config=VectorParams(
+                size=self._s.vector_size,
+                distance=Distance.COSINE,
+            ),
+        )
+
+    async def ready(self) -> tuple[bool, str | None]:
+        try:
+            client = await self._client_async()
+            await self._ensure_collection(client)
+            return True, None
+        except Exception as exc:
+            msg = f"{type(exc).__name__}: {exc}"
+            if len(msg) > 220:
+                msg = msg[:217] + "..."
+            return False, msg
+
+    async def ingest(self, req: SemanticCacheIngestRequest) -> SemanticCacheIngestResponse:
+        client = await self._client_async()
+        await self._ensure_collection(client)
+        if len(req.vector) != self._s.vector_size:
+            raise ValueError("vector dimension mismatch")
+        fact_id = (req.fact_id or "").strip() or str(uuid.uuid4())
+        ingested_at = _iso_now()
+        payload = {
+            "fact_id": fact_id,
+            "scope_id": req.scope_id,
+            "provenance_id": req.provenance_id,
+            "source_uri": req.source_uri or "",
+            "verified_by": req.verified_by,
+            "text": req.text,
+            "metadata": dict(req.metadata),
+            "ingested_at": ingested_at,
+        }
+        point = PointStruct(
+            id=_qdrant_point_id(req.scope_id, fact_id),
+            vector=req.vector,
+            payload=payload,
+        )
+        await client.upsert(collection_name=self._s.collection, points=[point])
+        return SemanticCacheIngestResponse(
+            fact_id=fact_id,
+            scope_id=req.scope_id,
+            provenance_id=req.provenance_id,
+            collection=self._s.collection,
+            schema_version=SCHEMA_VERSION,
+        )
+
+    async def query(self, req: SemanticCacheQueryRequest) -> list[VerifiedFact]:
+        client = await self._client_async()
+        await self._ensure_collection(client)
+        if len(req.query_vector) != self._s.vector_size:
+            raise ValueError("vector dimension mismatch")
+        flt = Filter(
+            must=[
+                FieldCondition(key="scope_id", match=MatchValue(value=req.scope_id)),
+            ]
+        )
+        eff_thr = (
+            req.score_threshold
+            if req.score_threshold is not None
+            else self._s.default_score_threshold
+        )
+        # Fetch without server-side score_threshold so callers can distinguish
+        # empty collection / no neighbors (`no_hits`) vs neighbors below cutoff
+        # (`below_threshold`) for structured miss logging.
+        res = await client.query_points(
+            collection_name=self._s.collection,
+            query=req.query_vector,
+            query_filter=flt,
+            limit=max(req.limit, min(50, req.limit * 5)),
+            with_payload=True,
+            score_threshold=None,
+        )
+        raw_points = list(res.points or [])
+        scored: list[tuple[Any, VerifiedFact]] = []
+        for sp in raw_points:
+            pl = sp.payload or {}
+            text = str(pl.get("text", ""))
+            snippet = text if len(text) <= 500 else text[:497] + "..."
+            vf = VerifiedFact(
+                fact_id=str(pl.get("fact_id", sp.id)),
+                provenance_id=str(pl.get("provenance_id", "")),
+                source_uri=str(pl.get("source_uri", "")),
+                snippet=snippet,
+                score=float(sp.score),
+                metadata=dict(pl.get("metadata") or {}),
+            )
+            scored.append((sp, vf))
+        scored.sort(key=lambda t: t[1].score, reverse=True)
+        passed = [t[1] for t in scored if t[1].score >= eff_thr][: req.limit]
+        return passed
+
+    async def consensus_fetch(
+        self, req: ConsensusRequest
+    ) -> tuple[list[VerifiedFact], str | None]:
+        if not req.query_vector:
+            return [], "query_vector_missing"
+        scope = req.semantic_scope_id.strip()
+        if not scope:
+            return [], "scope_empty"
+        if len(req.query_vector) != self._s.vector_size:
+            return [], "dimension_mismatch"
+        sub = SemanticCacheQueryRequest(
+            query=req.query or "",
+            query_vector=req.query_vector,
+            scope_id=scope,
+            limit=req.semantic_cache_limit,
+            score_threshold=req.semantic_cache_threshold,
+        )
+        try:
+            client = await self._client_async()
+            await self._ensure_collection(client)
+            flt = Filter(
+                must=[
+                    FieldCondition(key="scope_id", match=MatchValue(value=sub.scope_id)),
+                ]
+            )
+            eff_thr = (
+                sub.score_threshold
+                if sub.score_threshold is not None
+                else self._s.default_score_threshold
+            )
+            res = await client.query_points(
+                collection_name=self._s.collection,
+                query=sub.query_vector,
+                query_filter=flt,
+                limit=max(sub.limit, min(50, sub.limit * 5)),
+                with_payload=True,
+                score_threshold=None,
+            )
+            raw_points = list(res.points or [])
+            if not raw_points:
+                return [], "no_hits"
+            facts: list[VerifiedFact] = []
+            for sp in raw_points:
+                pl = sp.payload or {}
+                text = str(pl.get("text", ""))
+                snippet = text if len(text) <= 500 else text[:497] + "..."
+                facts.append(
+                    VerifiedFact(
+                        fact_id=str(pl.get("fact_id", sp.id)),
+                        provenance_id=str(pl.get("provenance_id", "")),
+                        source_uri=str(pl.get("source_uri", "")),
+                        snippet=snippet,
+                        score=float(sp.score),
+                        metadata=dict(pl.get("metadata") or {}),
+                    )
+                )
+            facts.sort(key=lambda f: f.score, reverse=True)
+            passed = [f for f in facts if f.score >= eff_thr][: sub.limit]
+            if not passed:
+                return [], "below_threshold"
+            return passed, None
+        except Exception as exc:
+            reason = _classify_semantic_cache_exception(exc)
+            logger.exception(
+                "semantic_cache.consensus_fetch_failed",
+                extra={
+                    "event": "semantic_cache.consensus_fetch_failed",
+                    "reason": reason,
+                },
+            )
+            return [], reason
+
+
+def _build_semantic_cache_backend() -> SemanticCacheBackend:
+    if _SEMANTIC_SETTINGS.mode == "disabled":
+        return _DisabledSemanticCache()
+    if _SEMANTIC_SETTINGS.mode == "misconfigured":
+        return _MisconfiguredSemanticCache(_SEMANTIC_SETTINGS.misconfigured_detail or "misconfigured")
+    return _QdrantSemanticCache(_SEMANTIC_SETTINGS)
+
+
+_SEMANTIC_CACHE: SemanticCacheBackend = _build_semantic_cache_backend()
+
+
+def _log_semantic_cache_miss(reason: str, **extra: Any) -> None:
+    logger.info(
+        "semantic_cache.miss",
+        extra={"event": "semantic_cache.miss", "reason": reason, **extra},
+    )
+
+
+def _run_async_in_probe(coro: Any) -> Any:
+    """Run coroutine from sync readiness probe (TestClient + uvicorn)."""
+
+    def _sync() -> Any:
+        return asyncio.run(coro)
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return _sync()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_sync).result(timeout=30.0)
+
+
 # --- Readiness registry -------------------------------------------------------
 
 
@@ -377,9 +904,13 @@ def _probe_graph_compiled() -> tuple[bool, str | None]:
 
 
 def _probe_semantic_cache() -> tuple[bool, str | None]:
-    # Qdrant integration lands in Story 4.1; flagged as not-required so absence
-    # does not flip the supervisor into `degraded` in v0.1.
-    return False, "planned — see Story 4.1"
+    try:
+        return _run_async_in_probe(_SEMANTIC_CACHE.ready())
+    except Exception as exc:
+        msg = f"{type(exc).__name__}: {exc}"
+        if len(msg) > 220:
+            msg = msg[:217] + "..."
+        return False, msg
 
 
 def _probe_mesh() -> tuple[bool, str | None]:
@@ -615,6 +1146,77 @@ def health():
     return JSONResponse(status_code=503, content=payload.model_dump())
 
 
+# --- `/semantic-cache/*` (Story 4.1) -----------------------------------------
+
+
+def _semantic_cache_503(message: str) -> JSONResponse:
+    bounded = message if len(message) <= 220 else message[:217] + "..."
+    return JSONResponse(
+        status_code=503,
+        content={"error": "semantic_cache_unavailable", "message": bounded},
+    )
+
+
+@app.post(
+    "/semantic-cache/ingest",
+    response_model=SemanticCacheIngestResponse,
+    responses={503: {"description": "Semantic cache unavailable or misconfigured."}},
+)
+async def semantic_cache_ingest(req: SemanticCacheIngestRequest) -> SemanticCacheIngestResponse | JSONResponse:
+    if _SEMANTIC_SETTINGS.mode != "qdrant":
+        return _semantic_cache_503("semantic cache is not configured")
+    if len(req.vector) != _SEMANTIC_SETTINGS.vector_size:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason": "dimension_mismatch",
+                "expected": _SEMANTIC_SETTINGS.vector_size,
+                "got": len(req.vector),
+            },
+        )
+    try:
+        return await _SEMANTIC_CACHE.ingest(req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("semantic_cache.ingest_failed")
+        return _semantic_cache_503(f"{type(exc).__name__}: {exc}")
+
+
+@app.post(
+    "/semantic-cache/query",
+    response_model=SemanticCacheQueryResponse,
+    responses={503: {"description": "Semantic cache unavailable or misconfigured."}},
+)
+async def semantic_cache_query(req: SemanticCacheQueryRequest) -> SemanticCacheQueryResponse | JSONResponse:
+    if _SEMANTIC_SETTINGS.mode == "disabled":
+        _log_semantic_cache_miss("disabled")
+        return _semantic_cache_503("semantic cache is not configured")
+    if _SEMANTIC_SETTINGS.mode == "misconfigured":
+        _log_semantic_cache_miss("qdrant_unavailable")
+        return _semantic_cache_503(
+            _SEMANTIC_SETTINGS.misconfigured_detail or "misconfigured"
+        )
+    if len(req.query_vector) != _SEMANTIC_SETTINGS.vector_size:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason": "dimension_mismatch",
+                "expected": _SEMANTIC_SETTINGS.vector_size,
+                "got": len(req.query_vector),
+            },
+        )
+    try:
+        hits = await _SEMANTIC_CACHE.query(req)
+        return SemanticCacheQueryResponse(hits=hits, schema_version=SCHEMA_VERSION)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("semantic_cache.query_failed")
+        _log_semantic_cache_miss("qdrant_unavailable")
+        return _semantic_cache_503(f"{type(exc).__name__}: {exc}")
+
+
 # --- `/consensus` ------------------------------------------------------------
 
 
@@ -672,7 +1274,7 @@ def _assign_default_agent_ids(opinions: list[AgentOpinion]) -> list[AgentOpinion
         }
     },
 )
-def run_consensus(
+async def run_consensus(
     query: str | None = None,
     body: ConsensusRequest | None = Body(default=None),
 ):
@@ -700,6 +1302,11 @@ def run_consensus(
             },
         )
 
+    verified_from_cache, miss_reason = await _SEMANTIC_CACHE.consensus_fetch(req)
+    cache_status, cache_reason = _consensus_semantic_cache_meta(miss_reason)
+    if miss_reason:
+        _log_semantic_cache_miss(miss_reason)
+
     opinions = list(req.opinions)
     if not opinions and req.query is not None:
         opinions = _synthesize_opinions_from_query(req.query)
@@ -708,7 +1315,7 @@ def run_consensus(
     initial_state: AgentState = {
         "messages": [req.query] if req.query else [],
         "consensus_score": 0.0,
-        "verified_facts": [],
+        "verified_facts": [v.model_dump() for v in verified_from_cache],
         "opinions": opinions,
         "votes": [],
         "round": 0,
@@ -754,15 +1361,25 @@ def run_consensus(
 
     rounds = max(1, int(result_state.get("round", 1)))
 
+    vf_raw = result_state.get("verified_facts", [])
+    verified_out: list[VerifiedFact] = []
+    for item in vf_raw:
+        if isinstance(item, VerifiedFact):
+            verified_out.append(item)
+        else:
+            verified_out.append(VerifiedFact.model_validate(item))
+
     payload = ConsensusResult(
         messages=result_state.get("messages", []),
         consensus_score=float(result_state.get("consensus_score", 0.0)),
-        verified_facts=result_state.get("verified_facts", []),
+        verified_facts=verified_out,
         decision=decision,
         votes=result_state.get("votes", []),
         termination_reason=termination_reason,
         rounds=rounds,
         threshold=req.threshold,
+        semantic_cache_status=cache_status,
+        semantic_cache_reason=cache_reason,
     )
 
     # One INFO line per request at the endpoint boundary — no per-round spam.
@@ -775,6 +1392,8 @@ def run_consensus(
             "score": payload.consensus_score,
             "termination_reason": payload.termination_reason,
             "decision_present": payload.decision is not None,
+            "semantic_cache_status": payload.semantic_cache_status,
+            "semantic_cache_reason": payload.semantic_cache_reason,
         },
     )
 
