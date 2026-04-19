@@ -120,9 +120,10 @@ Firecracker (Story 5.3 explicit).
 
 **Bindings today (v0.1).**
 
-- docker-compose and a baseline Terraform stub exist (Story 2.2 scope).
-- Mesh bootstrap automation: Story 5.1.
-- Default-deny egress at provision time: Story 2.3.
+- `POST /realms/spin` + `GET /realms/{job_id}` HTTP contract + `RealmAdapter` seam shipped (Story 2.1); `LocalNoopAdapter` is the only adapter in v0.1.
+- Terraform adapter v0 lands in Story 2.2 behind the same contract; docker-compose + baseline Terraform stub already exist in the repo.
+- Mesh bootstrap automation: Story 5.1 (consumes `SpinJob.outputs.mesh_endpoint`).
+- Default-deny egress at provision time: Story 2.3 (wraps `RealmAdapter.provision`).
 - Firecracker lifecycle: Story 5.3 (may trail MVP).
 
 ---

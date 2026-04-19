@@ -677,6 +677,526 @@ def test_health_includes_realtime_channel_dep():
     }
 
 
+# --- Story 2.1 (Realm spin) -------------------------------------------------
+#
+# AC 8 coverage. 13 new cases live under this banner — do NOT split
+# test_supervisor.py until the flat file crosses the documented threshold
+# (Story 4.2 or 6.1, per the TODO comment in supervisor.py).
+#
+# The lifecycle + conflict tests share a fixture that speeds / slows the
+# LocalNoopAdapter provision window so the sync `TestClient` + poll pattern
+# is deterministic. See `test_spin_job_progresses_through_lifecycle` for
+# the canonical async caveat comment.
+
+
+_SPIN_RESPONSE_KEYS = {
+    "job_id",
+    "realm_id",
+    "phase",
+    "adapter",
+    "created_at",
+    "status_url",
+    "schema_version",
+}
+
+
+@pytest.fixture(autouse=True)
+def _drain_spin_jobs():
+    """Reset the in-process spin registries between every test so one
+    test's lingering job cannot trip a later test's conflict / lookup
+    assertions. `autouse=True` — the fixture applies to all tests in
+    this module (including pre-Story-2.1 tests, which do not touch the
+    registries and so are unaffected). Per-test explicit
+    `_clear_spin_state()` calls below are retained as cheap belt-and-
+    suspenders and to keep the individual Story 2.1 tests self-documenting.
+    """
+    supervisor._SPIN_JOBS.clear()
+    supervisor._JOB_BY_REALM.clear()
+    yield
+    supervisor._SPIN_JOBS.clear()
+    supervisor._JOB_BY_REALM.clear()
+
+
+def _clear_spin_state() -> None:
+    supervisor._SPIN_JOBS.clear()
+    supervisor._JOB_BY_REALM.clear()
+
+
+def test_spin_accepts_valid_request_returns_202():
+    """AC 1 — minimal valid body → 202 + strict SpinResponse key set
+    + initial phase == 'validating'."""
+    _clear_spin_state()
+    response = client.post(
+        "/realms/spin",
+        json={"realm_description": "smoke test"},
+    )
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert set(body.keys()) == _SPIN_RESPONSE_KEYS, body
+    assert body["phase"] == "validating"
+    assert body["adapter"] == "local-noop"
+    assert body["schema_version"] == supervisor.SCHEMA_VERSION
+    assert body["created_at"].endswith("Z")
+    assert body["status_url"] == f"/realms/{body['job_id']}"
+    assert supervisor._REALM_ID_RE.match(body["realm_id"])
+
+
+def test_spin_echoes_caller_provided_realm_id():
+    """AC 1 — a valid caller-supplied realm_id is echoed verbatim."""
+    _clear_spin_state()
+    response = client.post(
+        "/realms/spin",
+        json={"realm_description": "echo test", "realm_id": "demo-a"},
+    )
+    assert response.status_code == 202, response.text
+    assert response.json()["realm_id"] == "demo-a"
+
+
+def test_spin_generates_realm_id_when_absent():
+    """AC 1 — server-minted realm_id matches `_REALM_ID_RE` and starts
+    with the documented `realm-` prefix."""
+    _clear_spin_state()
+    response = client.post(
+        "/realms/spin",
+        json={"realm_description": "auto-id"},
+    )
+    assert response.status_code == 202
+    realm_id = response.json()["realm_id"]
+    assert realm_id.startswith("realm-")
+    assert supervisor._REALM_ID_RE.match(realm_id)
+
+
+def test_spin_rejects_empty_description():
+    """AC 2 — empty `realm_description` → 400 + SpinError(code="validation_failed").
+
+    The `RequestValidationError` handler translates Pydantic's default
+    422 into the closed `SpinError` envelope on `/realms/*` endpoints so
+    the on-wire contract is invariant across every non-2xx path.
+    """
+    _clear_spin_state()
+    response = client.post(
+        "/realms/spin",
+        json={"realm_description": ""},
+    )
+    assert response.status_code == 400, response.text
+    body = response.json()
+    assert set(body.keys()) == {"code", "message", "details"}
+    assert body["code"] == "validation_failed"
+
+
+def test_spin_rejects_oversized_description():
+    """AC 2 — 2001-char description → 400 + SpinError(code="validation_failed")."""
+    _clear_spin_state()
+    response = client.post(
+        "/realms/spin",
+        json={"realm_description": "x" * 2001},
+    )
+    assert response.status_code == 400, response.text
+    body = response.json()
+    assert body["code"] == "validation_failed"
+
+
+def test_spin_rejects_whitespace_only_description():
+    """AC 2 — whitespace-only `realm_description` (`"   "`, `"\\n"`) is
+    stripped and rejected with 400 + SpinError(code="validation_failed")
+    so a meaningless job cannot land in the registry."""
+    _clear_spin_state()
+    for payload in ("   ", "\n", "\t\t"):
+        response = client.post(
+            "/realms/spin",
+            json={"realm_description": payload},
+        )
+        assert response.status_code == 400, response.text
+        assert response.json()["code"] == "validation_failed"
+
+
+def test_spin_rejects_invalid_realm_id():
+    """AC 2 — `realm_id` with whitespace fails the regex pattern →
+    400 + SpinError(code="invalid_realm_id")."""
+    _clear_spin_state()
+    response = client.post(
+        "/realms/spin",
+        json={"realm_description": "bad id", "realm_id": "bad id"},
+    )
+    assert response.status_code == 400, response.text
+    body = response.json()
+    assert body["code"] == "invalid_realm_id"
+
+
+def test_spin_rejects_unknown_adapter():
+    """AC 2 — unregistered adapter hint → 400 `adapter_unknown` with
+    `details.supported_adapters` listing the registered names."""
+    _clear_spin_state()
+    response = client.post(
+        "/realms/spin",
+        json={"realm_description": "wrong adapter", "adapter_hint": "aws"},
+    )
+    assert response.status_code == 400, response.text
+    body = response.json()
+    assert body["code"] == "adapter_unknown"
+    assert body["details"]["supported_adapters"] == ["local-noop"]
+
+
+def test_spin_rejects_conflict_on_active_realm(monkeypatch):
+    """AC 2 — back-to-back POSTs with the same `realm_id` → 409
+    `realm_id_conflict` while the first job is still non-terminal.
+
+    Uses a scoped `with TestClient(...) as local_client` so the ASGI
+    lifespan portal stays alive across both POSTs — otherwise the
+    ephemeral per-request portal cancels the background task between
+    calls and `_JOB_BY_REALM` is released before the second POST lands.
+    """
+    _clear_spin_state()
+    # Pin the provision window high so the first job stays in `provisioning`
+    # across the second POST — otherwise the conflict check races the
+    # background runner finishing and releasing `_JOB_BY_REALM`.
+    monkeypatch.setattr(supervisor, "PROVISION_DELAY_S", 5.0)
+
+    with TestClient(supervisor.app) as local_client:
+        first = local_client.post(
+            "/realms/spin",
+            json={"realm_description": "first", "realm_id": "dup-realm"},
+        )
+        assert first.status_code == 202
+
+        second = local_client.post(
+            "/realms/spin",
+            json={"realm_description": "second", "realm_id": "dup-realm"},
+        )
+        assert second.status_code == 409, second.text
+        body = second.json()
+        assert body["code"] == "realm_id_conflict"
+        assert body["details"]["existing_job_id"] == first.json()["job_id"]
+
+    # Drop the stuck job so the next test's registry starts clean.
+    _clear_spin_state()
+
+
+def test_spin_job_progresses_through_lifecycle(monkeypatch):
+    # Known limitation: TestClient is sync. The background runner spawned
+    # via asyncio.create_task only progresses between client.get() calls
+    # on the shared event loop. The bounded time.sleep + client.get poll
+    # below is the canonical pattern — do NOT rewrite as an async test
+    # without also switching the whole suite to httpx.AsyncClient, which
+    # is a separate (deferred) refactor tracked in Known follow-ups.
+    #
+    # The scoped `with TestClient(...) as local_client` block is load-bearing:
+    # it opens the ASGI lifespan portal so the event loop stays alive across
+    # every poll, keeping the asyncio.create_task(_run_spin_job) task runnable
+    # between sync GETs. Without it, each request spins an ephemeral portal
+    # and the background runner is cancelled mid-sleep.
+    _clear_spin_state()
+    # Longer provisioning window so the sync poll loop can reliably observe
+    # the validating → provisioning transition; without this, the 10 µs-class
+    # validate() + default noop provision complete before the first poll.
+    monkeypatch.setattr(supervisor, "PROVISION_DELAY_S", 0.15)
+
+    with TestClient(supervisor.app) as local_client:
+        resp = local_client.post(
+            "/realms/spin",
+            json={"realm_description": "lifecycle test"},
+        )
+        assert resp.status_code == 202
+        post_body = resp.json()
+        # AC 1 — the POST response itself carries the initial phase.
+        assert post_body["phase"] == "validating"
+        job_id = post_body["job_id"]
+        created_at = post_body["created_at"]
+
+        seen: list[str] = [post_body["phase"]]
+        # AC 3 — `updated_at` advances monotonically on every phase
+        # transition. Capture the first `updated_at` observed for each
+        # phase so we can assert three distinct values
+        # (validating → provisioning → ready).
+        updated_at_by_phase: dict[str, str] = {}
+        final_body: dict = {}
+        for _ in range(400):  # max ~2s wall time @ 5ms/poll
+            time.sleep(0.005)
+            r = local_client.get(f"/realms/{job_id}")
+            assert r.status_code == 200
+            body = r.json()
+            phase = body["phase"]
+            if phase not in updated_at_by_phase:
+                updated_at_by_phase[phase] = body["updated_at"]
+            if seen[-1] != phase:
+                seen.append(phase)
+            final_body = body
+            if phase in ("ready", "failed"):
+                break
+
+    assert final_body, "no final body captured"
+    assert final_body["phase"] == "ready", final_body
+    assert final_body["error"] is None
+    assert final_body["outputs"]["mesh_endpoint"] == f"noop://{final_body['realm_id']}"
+    assert final_body["outputs"]["adapter"] == "local-noop"
+    assert final_body["updated_at"].endswith("Z")
+    assert final_body["updated_at"] >= created_at  # monotonic advance
+    # Full lifecycle: validating (from POST) → provisioning → ready.
+    assert seen[0] == "validating"
+    assert seen[-1] == "ready"
+    assert "provisioning" in seen
+    # AC 3 — three distinct `updated_at` values across the transitions.
+    # validating `updated_at` from the POST response (not a subsequent
+    # poll, because the background task advances the phase before the
+    # first GET can observe it) plus provisioning / ready from the poll
+    # loop. All three must be monotonically ordered by ISO-8601 string
+    # comparison (safe because `_iso_now` pads to microseconds + `Z`).
+    validating_updated_at = post_body["created_at"]
+    provisioning_updated_at = updated_at_by_phase["provisioning"]
+    ready_updated_at = updated_at_by_phase["ready"]
+    assert validating_updated_at != provisioning_updated_at
+    assert provisioning_updated_at != ready_updated_at
+    assert validating_updated_at != ready_updated_at
+    assert (
+        validating_updated_at
+        <= provisioning_updated_at
+        <= ready_updated_at
+    )
+
+
+def test_spin_failure_surfaces_structured_error(monkeypatch):
+    """AC 4 — an exception from `adapter.provision` terminates the job as
+    `failed` with `error.code == 'adapter_error'` and a bounded
+    `traceback_preview` attached."""
+    _clear_spin_state()
+    monkeypatch.setattr(supervisor, "PROVISION_DELAY_S", 0.01)
+
+    async def _boom(req, job):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        supervisor._ADAPTERS["local-noop"], "provision", _boom
+    )
+
+    with TestClient(supervisor.app) as local_client:
+        resp = local_client.post(
+            "/realms/spin",
+            json={"realm_description": "fail me"},
+        )
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+
+        final_body: dict = {}
+        for _ in range(200):
+            time.sleep(0.01)
+            r = local_client.get(f"/realms/{job_id}")
+            assert r.status_code == 200
+            final_body = r.json()
+            if final_body["phase"] in ("ready", "failed"):
+                break
+
+    assert final_body["phase"] == "failed", final_body
+    assert final_body["error"] is not None
+    assert final_body["error"]["code"] == "adapter_error"
+    assert final_body["error"]["message"] == "boom"
+    assert final_body["error"]["details"]["exc_type"] == "RuntimeError"
+    assert "traceback_preview" in final_body["error"]["details"]
+    assert len(final_body["error"]["details"]["traceback_preview"]) <= 500
+    assert final_body["outputs"] == {}
+
+
+def test_get_realm_job_404_on_unknown_id():
+    """AC 3 — unknown job_id returns 404 + the SpinError envelope."""
+    _clear_spin_state()
+    response = client.get("/realms/does-not-exist")
+    assert response.status_code == 404, response.text
+    body = response.json()
+    assert body["code"] == "job_not_found"
+    assert body["details"]["job_id"] == "does-not-exist"
+
+
+def test_health_includes_realm_manager_dep():
+    """AC 6 — `/health.checks["realm_manager"]` is required + ready."""
+    response = client.get("/health")
+    assert response.status_code == 200
+    body = response.json()
+    assert "realm_manager" in body["checks"]
+    assert body["checks"]["realm_manager"] == {
+        "ready": True,
+        "required": True,
+        "detail": None,
+    }
+
+
+# --- Story 2.1 code-review patches (2026-04-18) ------------------------------
+
+
+def test_update_job_refuses_to_mutate_terminal_phase():
+    """AC 4 — `_update_job` raises `RuntimeError` on any attempt to
+    mutate a `ready` / `failed` job. Guards the documented terminal-
+    phase immutability invariant so a future refactor that removes the
+    assert is caught directly (not just via full-lifecycle post-conditions).
+    """
+    for terminal in ("ready", "failed"):
+        job = supervisor.SpinJob(
+            job_id="job-immutable-test",
+            realm_id="realm-immutable",
+            phase=terminal,
+            adapter="local-noop",
+            created_at="2026-04-18T00:00:00.000000Z",
+            updated_at="2026-04-18T00:00:00.000000Z",
+            realm_description="immutability test",
+            agent_count=1,
+            outputs={},
+            error=None,
+            schema_version=supervisor.SCHEMA_VERSION,
+        )
+        with pytest.raises(RuntimeError, match="refusing to mutate terminal"):
+            supervisor._update_job(job, phase="provisioning")
+
+
+def test_spin_rejects_503_when_realm_manager_unready(monkeypatch):
+    """AC 2 — readiness registry reports `realm_manager` not-ready →
+    503 + `SpinError(code="realm_manager_unavailable")` on POST /realms/spin.
+    Exercised by zeroing `_ADAPTERS` so `_probe_realm_manager` returns
+    `(False, "no adapters registered")`.
+    """
+    _clear_spin_state()
+    monkeypatch.setattr(supervisor, "_ADAPTERS", {})
+    response = client.post(
+        "/realms/spin",
+        json={"realm_description": "unready probe"},
+    )
+    assert response.status_code == 503, response.text
+    body = response.json()
+    assert set(body.keys()) == {"code", "message", "details"}
+    assert body["code"] == "realm_manager_unavailable"
+    # Per `_spin_error_response` contract: `details` is `{}` on this path
+    # (the probe detail is already the human-readable message).
+    assert body["details"] == {}
+
+
+def test_spin_rejects_empty_adapter_hint_as_unknown():
+    """AC 2 — explicit empty-string `adapter_hint` is NOT silently
+    coerced to `local-noop`; the caller must see 400 `adapter_unknown`
+    so a misconfigured client does not drift onto the noop adapter.
+    """
+    _clear_spin_state()
+    response = client.post(
+        "/realms/spin",
+        json={"realm_description": "empty hint", "adapter_hint": ""},
+    )
+    assert response.status_code == 400, response.text
+    body = response.json()
+    assert body["code"] == "adapter_unknown"
+    assert body["details"]["supported_adapters"] == ["local-noop"]
+
+
+@pytest.mark.parametrize(
+    ("agent_count", "expected_status"),
+    [
+        (0, 400),
+        (1, 202),
+        (50, 202),
+        (51, 400),
+    ],
+)
+def test_spin_agent_count_boundaries(agent_count, expected_status):
+    """AC 2 — `agent_count ∈ [1, 50]` at the boundary. 0 and 51 produce
+    400 + `validation_failed`; 1 and 50 produce 202 so the spec'd bounds
+    cannot be silently loosened. A separate test covers non-integer
+    payloads (`"3"`) below."""
+    _clear_spin_state()
+    response = client.post(
+        "/realms/spin",
+        json={
+            "realm_description": f"boundary test {agent_count}",
+            "agent_count": agent_count,
+        },
+    )
+    assert response.status_code == expected_status, response.text
+    if expected_status == 400:
+        assert response.json()["code"] == "validation_failed"
+
+
+def test_spin_rejects_non_integer_agent_count():
+    """AC 2 — `agent_count` must be an int. Pydantic's default coercion
+    would happily turn `"3"` into `3`; the test pins the expectation that
+    non-integer JSON types fail validation (via `ConfigDict` strict-ish
+    behavior over Pydantic v2) rather than silently coercing."""
+    _clear_spin_state()
+    response = client.post(
+        "/realms/spin",
+        json={
+            "realm_description": "str agent_count",
+            "agent_count": "three",
+        },
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["code"] == "validation_failed"
+
+
+def test_spin_rejects_unknown_keys_via_extra_forbid():
+    """AC 2 — `SpinRequest.model_config = ConfigDict(extra="forbid")`
+    rejects unknown keys. A refactor that flipped to `extra="ignore"`
+    would silently loosen the documented "unknown keys rejected early"
+    contract; this test pins the behavior.
+    """
+    _clear_spin_state()
+    response = client.post(
+        "/realms/spin",
+        json={"realm_description": "bogus key", "bogus_key": 1},
+    )
+    assert response.status_code == 400, response.text
+    body = response.json()
+    assert body["code"] == "validation_failed"
+
+
+def test_spin_error_rejects_unknown_code_at_construction():
+    """Closed-enum enforcement — `SpinError(code="not_in_enum", ...)` is
+    rejected by Pydantic because `SpinErrorCode` is a `Literal`. Pins
+    the invariant documented in the `SpinError` docstring.
+    """
+    with pytest.raises(Exception):  # Pydantic's ValidationError subclass
+        supervisor.SpinError(code="not_in_enum", message="nope", details={})
+
+
+def test_spin_validation_error_rejects_unknown_code_at_construction():
+    """Closed-enum enforcement — `SpinValidationError("quota_exceeded", ...)`
+    must raise `ValueError` so a future adapter cannot smuggle a new
+    code onto the wire without documenting it.
+    """
+    with pytest.raises(ValueError, match="not in closed enum"):
+        supervisor.SpinValidationError("quota_exceeded", "nope")
+
+
+def test_spin_running_task_set_is_released_after_terminal(monkeypatch):
+    """P1 — `_RUNNING_SPIN_TASKS` holds a strong ref to the background
+    task so it cannot be GC'd mid-execution; the done-callback releases
+    the entry so the set does not leak entries across the process lifetime.
+    """
+    _clear_spin_state()
+    monkeypatch.setattr(supervisor, "PROVISION_DELAY_S", 0.01)
+
+    with TestClient(supervisor.app) as local_client:
+        resp = local_client.post(
+            "/realms/spin",
+            json={"realm_description": "task-set release"},
+        )
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+
+        for _ in range(200):
+            time.sleep(0.01)
+            body = local_client.get(f"/realms/{job_id}").json()
+            if body["phase"] in ("ready", "failed"):
+                break
+
+    # After the task completes the done-callback must have fired,
+    # releasing the strong reference so `_RUNNING_SPIN_TASKS` is empty
+    # and the process doesn't accumulate task objects.
+    assert supervisor._RUNNING_SPIN_TASKS == set()
+
+
+def test_schema_version_still_3():
+    """AC 6 — Story 2.1 is a dep-only additive change; SCHEMA_VERSION
+    stays at 3. If a future story bumps the integer, this test (and the
+    sibling `test_schema_version_pinned` / `test_schema_version_is_3`)
+    must all be updated together so the intent is impossible to miss in
+    a diff review."""
+    assert supervisor.SCHEMA_VERSION == 3
+
+
 def test_root_includes_realtime_block():
     """AC 7 — `GET /` body gains the additive `realtime` block."""
     response = client.get("/")

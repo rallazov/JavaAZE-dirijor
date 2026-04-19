@@ -9,7 +9,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
-import { useAwsSpin } from '@/hooks/useAwsSpin';
+import { useRealmSpin } from '@/hooks/useRealmSpin';
 import { useCanvasStore } from '@/store/canvas-store';
 import { cn } from '@/lib/utils';
 
@@ -26,7 +26,7 @@ export function RealmToolbar({ className }: { className?: string }) {
   const inspectorOpen = useCanvasStore((s) => s.inspectorOpen);
   const toggleInspector = useCanvasStore((s) => s.toggleInspector);
   const resetGraphToDemo = useCanvasStore((s) => s.resetGraphToDemo);
-  const { phase, spinPrivateRealm, jobId } = useAwsSpin();
+  const { phase, spinPrivateRealm, jobId, realmId, error } = useRealmSpin();
 
   return (
     <TooltipProvider>
@@ -159,13 +159,24 @@ export function RealmToolbar({ className }: { className?: string }) {
               </span>
             </TooltipTrigger>
             <TooltipContent side="bottom" className="max-w-xs">
-              Provisions private network segments and agent runtimes (stub — wire to AWS orchestration API).
+              Calls POST /realms/spin on Dirijor Core (Story 2.1).
             </TooltipContent>
           </Tooltip>
         </div>
         {jobId && phase === 'ready' && (
-          <p className="basis-full text-right font-mono text-[10px] text-realm-emerald md:basis-auto" role="status">
-            Job {jobId} · ready for mesh attach
+          <p
+            className="basis-full text-right font-mono text-[10px] text-realm-emerald md:basis-auto"
+            role="status"
+          >
+            Job {jobId} · realm {realmId ?? '—'} · ready for mesh attach
+          </p>
+        )}
+        {phase === 'failed' && error && (
+          <p
+            className="basis-full text-right font-mono text-[10px] text-amber-300 md:basis-auto"
+            role="status"
+          >
+            {error.code}: {error.message}
           </p>
         )}
       </header>
