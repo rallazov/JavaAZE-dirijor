@@ -54,4 +54,4 @@ that deny outbound to the public Internet unless policy allows it.
 ## References
 
 - [`docs/reference/supervisor-api.md`](../../reference/supervisor-api.md)
-- [`terraform/modules/private-realm/README.md`](../../../terraform/modules/private-realm/README.md)
+- [`terraform/modules/private-realm/README.md`](https://github.com/JavaAZE/JavaAZE-dirijor/blob/main/terraform/modules/private-realm/README.md)
