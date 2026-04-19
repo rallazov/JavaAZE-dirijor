@@ -30,7 +30,7 @@ v0.1 supervisor exposes — no opinions, no recommendations. For the
 | Field | Value | Meaning |
 |---|---|---|
 | `SERVICE_VERSION` | `"0.1.0"` | Module constant; `FastAPI(version=...)` and every response read this. |
-| `SCHEMA_VERSION` | `4` | Contract shape version. Story 2.2 bumped 3→4 (`DELETE /realms/{job_id}` + destroy-related `outputs` keys + nine new `SpinError.code` values). Story 3.2 bumped 1→2 (debate loop), Story 3.3 bumped 2→3 (WebSocket channel + `realtime` block). Story 2.1 added the `realm_manager` readiness-registry dep without bumping — precedent for "dep-only additive" extensions. |
+| `SCHEMA_VERSION` | `4` | Contract shape version. Story 2.2 bumped 3→4 (`DELETE /realms/{job_id}` + destroy-related `outputs` keys + nine new `SpinError.code` values). Story 3.2 bumped 1→2 (debate loop), Story 3.3 bumped 2→3 (WebSocket channel + `realtime` block). Story 2.1 added the `realm_manager` readiness-registry dep without bumping — precedent for "dep-only additive" extensions. Story 2.3 added **`egress_policy_denied`** and Terraform egress controls **without** bumping `SCHEMA_VERSION` (env- and module-driven only). |
 
 ## Endpoints at a glance
 
@@ -342,6 +342,7 @@ additive change and requires updating this page in the same PR.
 | `terraform_destroy_failed`   | _on job surface_ / nested in `outputs.destroy_error` | `terraform destroy` non-zero on the DELETE path. |
 | `terraform_command_timeout`  | _on job surface_ | Subprocess exceeded `DIRIJOR_TERRAFORM_CMD_TIMEOUT_S`. |
 | `adapter_credentials_missing`| _on job surface_ | `DIGITALOCEAN_TOKEN` missing at validate time. |
+| `egress_policy_denied`       | _on job surface_ | Pre-provision egress policy hook denied the spin (`validate` / `provision` only — not `destroy`). `details.reason` (e.g. `policy_hook`), `details.policy_id` (e.g. `egress-default-v0`), `details.adapter`. **`DIRIJOR_EGRESS_POLICY_DENY`** is recognized only when the value trims to exactly **`1`** (unlike **`DIRIJOR_ALLOW_PUBLIC_EGRESS`**, which treats `1` / `true` / `yes` / `on` as truthy). |
 | `destroy_invalid_state`      | `409` | `DELETE` when `phase != "ready"`. `details.current_phase`. |
 | `destroy_already_requested`  | `409` | Second `DELETE` while destroy is in flight. `details.destroy_requested_at`. |
 
@@ -351,9 +352,22 @@ When registered at process start (requires non-empty **`DIGITALOCEAN_TOKEN`**
 and a terraform binary on **`PATH`** or at **`DIRIJOR_TERRAFORM_BINARY`**),
 `adapter_hint: "terraform-digitalocean"` runs `terraform init → validate →
 plan → apply` in a per-realm workspace under **`DIRIJOR_TERRAFORM_WORKSPACE_ROOT`**
-(default: `<temp>/dirijor/terraform-workspaces/<realm_id>/`). Ready
-`outputs` include `realm_vpc_id`, `realm_vpc_ip_range`, `mesh_endpoint`
-(`tf://<vpc_id>` placeholder until Story 5.1), `tf_workspace`, `tf_plan_digest`.
+(default: `<temp>/dirijor/terraform-workspaces/<realm_id>/`). The adapter is
+wrapped by **`EgressPolicyRealmAdapter`** (Story 2.3) so a composable policy hook
+runs before `validate` / `provision`. Ready `outputs` include `realm_vpc_id`,
+`realm_vpc_ip_range`, `mesh_endpoint` (`tf://<vpc_id>` placeholder until Story
+5.1), `tf_workspace`, `tf_plan_digest`.
+
+**Egress posture (Story 2.3):** the copied `terraform/modules/private-realm`
+module applies a DigitalOcean Cloud Firewall with **default-deny outbound to
+the public Internet** unless **`DIRIJOR_ALLOW_PUBLIC_EGRESS`** is set to a truthy
+value (`1`, `true`, `yes`, `on`) on the supervisor process — passed as
+`allow_public_egress` in `terraform.tfvars.json`. Rules apply to resources that
+carry the `dirijor-realm-<realm_id>` tag (see ADR-0004). Reserved
+**`DIRIJOR_EGRESS_POLICY_DENY=1`** (exact `1` after trim — not a general truthy
+check) forces a terminal `failed` with `code: egress_policy_denied` (tests / drills).
+
+See [ADR-0004](../architecture/adr/0004-default-deny-egress-terraform.md).
 
 Worked examples:
 
@@ -621,6 +635,7 @@ Tests cover:
 - Story 3.3 WebSocket suite: `test_ws_accepts_valid_realm_id`, `test_ws_rejects_missing_realm_id`, `test_ws_rejects_malformed_realm_id`, `test_ws_rejects_forbidden_realm`, `test_ws_broadcast_reaches_only_matching_realm`, `test_ws_heartbeat_emitted_on_idle`, `test_ws_disconnect_cleans_up_registry`, `test_ws_close_1011_on_send_failure`
 - Story 2.1 realm-spin suite: `test_spin_accepts_valid_request_returns_202`, `test_spin_echoes_caller_provided_realm_id`, `test_spin_generates_realm_id_when_absent`, `test_spin_rejects_empty_description`, `test_spin_rejects_oversized_description`, `test_spin_rejects_invalid_realm_id`, `test_spin_rejects_unknown_adapter`, `test_spin_rejects_conflict_on_active_realm`, `test_spin_job_progresses_through_lifecycle`, `test_spin_failure_surfaces_structured_error`, `test_get_realm_job_404_on_unknown_id`, `test_health_includes_realm_manager_dep`
 - Story 2.2 terraform + destroy suite (20 cases): `test_terraform_adapter_registered_when_token_and_binary_present`, `test_terraform_adapter_skipped_when_token_absent`, `test_terraform_adapter_skipped_when_binary_missing`, `test_spin_terraform_adapter_accepts_and_returns_202`, `test_spin_terraform_lifecycle_progresses_to_ready`, `test_spin_terraform_invokes_commands_in_order`, `test_spin_terraform_init_failure_surfaces_terraform_init_failed`, `test_spin_terraform_validate_failure_surfaces_terraform_validate_failed`, `test_spin_terraform_plan_failure_surfaces_terraform_plan_failed`, `test_spin_terraform_apply_failure_surfaces_terraform_apply_failed`, `test_spin_terraform_apply_failure_scrubs_do_pat_tokens`, `test_spin_terraform_command_timeout_surfaces_terraform_command_timeout`, `test_spin_terraform_credentials_missing_at_validate_time_surfaces_adapter_credentials_missing`, `test_destroy_on_ready_job_returns_202_and_runs_terraform_destroy`, `test_destroy_on_non_ready_job_returns_409_destroy_invalid_state`, `test_destroy_idempotent_on_already_destroyed_returns_204`, `test_delete_realm_job_404_on_unknown_id`, `test_schema_version_is_4`, `test_scrub_secrets_masks_all_documented_patterns`, `test_local_noop_destroy_is_idempotent_noop`
+- Story 2.3 default-deny egress: `test_terraform_write_tfvars_allow_public_egress_default_false`, `test_terraform_write_tfvars_allow_public_egress_from_env`, `test_spin_validation_error_accepts_egress_policy_denied`, `test_spin_egress_policy_denied_when_env_set`, `test_egress_policy_deny_env_does_not_affect_local_noop`, `test_private_realm_main_tf_firewall_realm_egress_default_deny_structure`, `test_private_realm_variables_allow_public_egress_defaults_false`
 
 If any test fails, **this reference is out of date** — file a docs PR
 before merging the code PR that changed the contract.

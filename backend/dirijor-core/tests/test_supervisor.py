@@ -2009,6 +2009,123 @@ def test_spin_terraform_output_step_nonzero_surfaces_terraform_apply_failed(
     assert final["error"]["details"].get("reason") == "terraform_output_failed"
 
 
+# --- Story 2.3 (default-deny egress) ------------------------------------------
+
+
+def test_terraform_write_tfvars_allow_public_egress_default_false(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("DIRIJOR_ALLOW_PUBLIC_EGRESS", raising=False)
+    stub = _StubTerraformRunner()
+    tf = supervisor.TerraformAdapter(
+        workspace_root=tmp_path,
+        subprocess_runner=stub,
+        env_provider=_tf_env_provider,
+        module_source=tmp_path / "mod",
+    )
+    (tmp_path / "mod").mkdir()
+    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    req = supervisor.SpinRequest(realm_description="d", agent_count=2)
+    tf._write_tfvars(ws, req, "realm-abc")
+    data = json.loads((ws / "terraform.tfvars.json").read_text())
+    assert data["allow_public_egress"] is False
+
+
+def test_terraform_write_tfvars_allow_public_egress_from_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("DIRIJOR_ALLOW_PUBLIC_EGRESS", "1")
+    stub = _StubTerraformRunner()
+    tf = supervisor.TerraformAdapter(
+        workspace_root=tmp_path,
+        subprocess_runner=stub,
+        env_provider=_tf_env_provider,
+        module_source=tmp_path / "mod",
+    )
+    (tmp_path / "mod").mkdir()
+    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
+    ws = tmp_path / "ws2"
+    ws.mkdir()
+    req = supervisor.SpinRequest(realm_description="d", agent_count=2)
+    tf._write_tfvars(ws, req, "realm-xyz")
+    data = json.loads((ws / "terraform.tfvars.json").read_text())
+    assert data["allow_public_egress"] is True
+
+
+def test_spin_validation_error_accepts_egress_policy_denied():
+    exc = supervisor.SpinValidationError(
+        code="egress_policy_denied",
+        message="policy",
+        details={"reason": "policy_hook"},
+    )
+    assert exc.code == "egress_policy_denied"
+
+
+def test_spin_egress_policy_denied_when_env_set(monkeypatch, tmp_path):
+    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    monkeypatch.setenv("DIRIJOR_EGRESS_POLICY_DENY", "1")
+    stub = _StubTerraformRunner()
+    inner = supervisor.TerraformAdapter(
+        workspace_root=tmp_path,
+        subprocess_runner=stub,
+        env_provider=_tf_env_provider,
+        module_source=tmp_path / "mod",
+    )
+    (tmp_path / "mod").mkdir()
+    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
+    wrapped = supervisor._wrap_realm_adapter_with_egress_policy(inner)
+    monkeypatch.setattr(
+        supervisor,
+        "_ADAPTERS",
+        {
+            "local-noop": supervisor._ADAPTERS["local-noop"],
+            "terraform-digitalocean": wrapped,
+        },
+    )
+    _clear_spin_state()
+    with TestClient(supervisor.app) as local_client:
+        resp = local_client.post(
+            "/realms/spin",
+            json={
+                "realm_description": "policy deny",
+                "adapter_hint": "terraform-digitalocean",
+            },
+        )
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        final: dict = {}
+        for _ in range(400):
+            time.sleep(0.005)
+            body = local_client.get(f"/realms/{job_id}").json()
+            if body["phase"] in ("ready", "failed"):
+                final = body
+                break
+    assert final["phase"] == "failed"
+    assert final["error"]["code"] == "egress_policy_denied"
+    assert final["error"]["details"]["policy_id"] == "egress-default-v0"
+    assert [c[0] for c in stub.calls] == []
+
+
+def test_egress_policy_deny_env_does_not_affect_local_noop(monkeypatch):
+    monkeypatch.setenv("DIRIJOR_EGRESS_POLICY_DENY", "1")
+    _clear_spin_state()
+    with TestClient(supervisor.app) as local_client:
+        resp = local_client.post(
+            "/realms/spin",
+            json={"realm_description": "noop under deny flag"},
+        )
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        final: dict = {}
+        for _ in range(400):
+            time.sleep(0.005)
+            body = local_client.get(f"/realms/{job_id}").json()
+            if body["phase"] in ("ready", "failed"):
+                final = body
+                break
+    assert final["phase"] == "ready"
+
+
 def test_terraform_adapter_invalid_cmd_timeout_env_falls_back(monkeypatch, tmp_path):
     monkeypatch.setenv("DIRIJOR_TERRAFORM_CMD_TIMEOUT_S", "not-a-float")
     stub = _StubTerraformRunner()

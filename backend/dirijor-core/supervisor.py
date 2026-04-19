@@ -92,6 +92,8 @@ SERVICE_VERSION = "0.1.0"
 # readiness-registry dep only, which the stability policy
 # explicitly exempts. This bump follows the Story 3.3 precedent
 # (new top-level surface -> bump).
+# Story 2.3 (2026-04-19) adds `egress_policy_denied` and Terraform egress
+# module fields without bumping SCHEMA_VERSION (env + tfvars only — ADR-0004).
 SCHEMA_VERSION = 4
 STARTED_AT = time.monotonic()
 STARTUP_GRACE_S = 1.0
@@ -838,6 +840,7 @@ SpinErrorCode = Literal[
     "adapter_credentials_missing",
     "destroy_invalid_state",
     "destroy_already_requested",
+    "egress_policy_denied",
 ]
 _SPIN_ERROR_CODES: tuple[str, ...] = get_args(SpinErrorCode)
 
@@ -1059,6 +1062,70 @@ class LocalNoopAdapter:
         return
 
 
+# --- Egress policy wrapper (Story 2.3) ---------------------------------------
+#
+# Composable RealmAdapter wrapper — keeps TerraformAdapter free of ad-hoc
+# policy checks. Registered only for `terraform-digitalocean` at import
+# time. `LocalNoopAdapter` is never wrapped.
+
+
+def _env_flag_truthy(name: str) -> bool:
+    v = os.environ.get(name, "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _allow_public_egress_from_env() -> bool:
+    """Operator escape hatch: allow public Internet egress in Terraform."""
+    return _env_flag_truthy("DIRIJOR_ALLOW_PUBLIC_EGRESS")
+
+
+def _enforce_spin_egress_policy(_req: SpinRequest, adapter_name: str) -> None:
+    """Pre-terraform policy hook (AC 3) on validate/provision only — not destroy.
+
+    `DIRIJOR_EGRESS_POLICY_DENY` is intentionally strict: only the value `"1"`
+    (after strip) enables denial. Broader truthy parsing is reserved for
+    `DIRIJOR_ALLOW_PUBLIC_EGRESS` via `_env_flag_truthy`.
+    """
+    if os.environ.get("DIRIJOR_EGRESS_POLICY_DENY", "").strip() == "1":
+        raise SpinValidationError(
+            code="egress_policy_denied",
+            message="egress policy denied this realm spin request",
+            details={
+                "reason": "policy_hook",
+                "policy_id": "egress-default-v0",
+                "adapter": adapter_name,
+            },
+        )
+
+
+class EgressPolicyRealmAdapter:
+    """Delegates to an inner adapter after Story 2.3 egress policy checks."""
+
+    def __init__(self, inner: RealmAdapter) -> None:
+        self._inner = inner
+
+    @property
+    def name(self) -> str:
+        return self._inner.name
+
+    async def validate(self, req: SpinRequest) -> None:
+        _enforce_spin_egress_policy(req, self._inner.name)
+        await self._inner.validate(req)
+
+    async def provision(
+        self, req: SpinRequest, job: SpinJob
+    ) -> dict[str, Any]:
+        _enforce_spin_egress_policy(req, self._inner.name)
+        return await self._inner.provision(req, job)
+
+    async def destroy(self, job: SpinJob) -> None:
+        await self._inner.destroy(job)
+
+
+def _wrap_realm_adapter_with_egress_policy(inner: RealmAdapter) -> RealmAdapter:
+    return EgressPolicyRealmAdapter(inner)
+
+
 # --- Terraform adapter (Story 2.2) -------------------------------------------
 #
 # The real subprocess runner is NEVER instantiated under pytest — every Story
@@ -1244,6 +1311,7 @@ class TerraformAdapter:
             "realm_name": realm_id,
             "agent_count": req.agent_count,
             "cloud_provider": "digitalocean",
+            "allow_public_egress": _allow_public_egress_from_env(),
         }
         tfvars_path = ws / "terraform.tfvars.json"
         tfvars_path.write_text(
@@ -1590,14 +1658,16 @@ def _build_terraform_adapter() -> TerraformAdapter | None:
     return adapter
 
 
-# Story 2.3 will wrap `.provision` with a default-deny egress policy decorator.
+# Story 2.3: wrap terraform adapter with composable egress policy (validate +
+# provision); Terraform module enforces default-deny public egress unless
+# DIRIJOR_ALLOW_PUBLIC_EGRESS is truthy.
 _ADAPTERS: dict[str, RealmAdapter] = {
     LocalNoopAdapter.name: LocalNoopAdapter(),
 }
 
 _maybe_tf = _build_terraform_adapter()
 if _maybe_tf is not None:
-    _ADAPTERS[_maybe_tf.name] = _maybe_tf
+    _ADAPTERS[_maybe_tf.name] = _wrap_realm_adapter_with_egress_policy(_maybe_tf)
 
 
 # --- Job registry + state machine -------------------------------------------
