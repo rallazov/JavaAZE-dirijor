@@ -30,7 +30,7 @@ v0.1 supervisor exposes — no opinions, no recommendations. For the
 | Field | Value | Meaning |
 |---|---|---|
 | `SERVICE_VERSION` | `"0.1.0"` | Module constant; `FastAPI(version=...)` and every response read this. |
-| `SCHEMA_VERSION` | `3` | Contract shape version. Bumps on **additive** change too so clients can detect feature availability; breaking changes require a **major** bump. Story 3.2 bumped 1→2 (debate loop), Story 3.3 bumped 2→3 (WebSocket channel + `realtime` block). |
+| `SCHEMA_VERSION` | `3` | Contract shape version. Bumps on **additive** change too so clients can detect feature availability; breaking changes require a **major** bump. Story 3.2 bumped 1→2 (debate loop), Story 3.3 bumped 2→3 (WebSocket channel + `realtime` block). Story 2.1 (2026-04-18) added the `realm_manager` readiness-registry dep **without** bumping — precedent for "dep-only additive" extensions: adding a new readiness-registry dependency does NOT bump `SCHEMA_VERSION`. |
 
 ## Endpoints at a glance
 
@@ -39,6 +39,8 @@ v0.1 supervisor exposes — no opinions, no recommendations. For the
 | `GET`  | `/`                           | Service identity, aggregate status, per-dependency readiness          | `200` |
 | `GET`  | `/health`                     | Liveness + readiness with ISO-8601 timestamp                          | `200` (ready) / `503` (degraded) |
 | `POST` | `/consensus`                  | Multi-agent debate loop (Story 3.2 — real, configurable threshold)    | `200` / `503` (if graph unavailable) |
+| `POST` | `/realms/spin`                | Enqueue a realm provisioning job (Story 2.1 — adapter-backed, async)  | `202` / `400` / `409` / `503` |
+| `GET`  | `/realms/{job_id}`            | Poll spin job state (Story 2.1 — `validating → provisioning → ready \| failed`) | `200` / `404` |
 | `WS`   | `/ws/realm/{realm_id}`        | Live topology / metrics / HITL events for the Private Realm canvas    | accept `101` / close `4401`, `4403`, `1011` |
 
 The Docker image ships a stdlib `HEALTHCHECK` that calls `GET /health`
@@ -249,6 +251,202 @@ To diagnose *why*, poll `GET /health` and read
 
 ---
 
+## `POST /realms/spin`
+
+**Purpose.** Enqueue a realm provisioning job. Shipped by **Story 2.1**
+(done 2026-04-18). v0.1 ships one adapter (`local-noop`) that simulates
+provisioning in-process; Story 2.2 registers `TerraformAdapter`, Story
+2.3 wraps `.provision` with default-deny egress, Story 5.1 consumes
+`outputs.mesh_endpoint` to enroll the mesh. The HTTP contract is
+designed to stay stable across those future stories — consumers bind to
+this page, not to adapter implementations.
+
+### Request
+
+```
+POST /realms/spin
+Content-Type: application/json
+```
+
+```json
+{
+  "realm_description": "finance-swarm prod",
+  "adapter_hint":      "local-noop",
+  "realm_id":          "demo-a",
+  "agent_count":       3
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `realm_description` | `string` (1–2000 chars) | yes | Free-form operator intent. |
+| `adapter_hint`      | `string \| null`        | no  | Name of a registered adapter. Defaults to `"local-noop"`. Unknown names → `400 adapter_unknown`. |
+| `realm_id`          | `string \| null`        | no  | Matches `^[a-zA-Z0-9_-]{1,64}$`. Server-minted as `"realm-<short-uuid>"` when absent. |
+| `agent_count`       | `int` (1–50)            | no  | Defaults to `3`. |
+
+The `SpinRequest` Pydantic model uses `ConfigDict(extra="forbid")` —
+unknown keys → `400 validation_failed`.
+
+### Response — `202 Accepted`
+
+Pydantic model: `SpinResponse`.
+
+```json
+{
+  "job_id":          "5f1c0b2e-3d4a-4f5b-8c7d-9e0a1b2c3d4e",
+  "realm_id":        "realm-5f1c0b2e",
+  "phase":           "validating",
+  "adapter":         "local-noop",
+  "created_at":      "2026-04-18T10:12:44.117Z",
+  "status_url":      "/realms/5f1c0b2e-3d4a-4f5b-8c7d-9e0a1b2c3d4e",
+  "schema_version":  3
+}
+```
+
+The initial `phase` on a 202 is **always** `"validating"`. Subsequent
+state (`provisioning`, `ready`, `failed`) is observed by polling
+`GET /realms/{job_id}`.
+
+### Error envelope — `SpinError`
+
+Every non-2xx response on `/realms/*` uses this shape. The server emits
+via `JSONResponse(status_code=..., content=SpinError(...).model_dump())`
+— NOT `HTTPException`, which would wrap the body in `{"detail": ...}`.
+
+```json
+{
+  "code":    "<stable_snake_case_enum>",
+  "message": "<human-readable>",
+  "details": { /* code-specific */ }
+}
+```
+
+The `code` field is a **closed** v0.1 enum. Adding a new code is an
+additive change and requires updating this page in the same PR.
+
+| Code | HTTP | When |
+|---|---|---|
+| `validation_failed`          | `400` | Missing required field, empty `realm_description`, oversized (>2000 chars), `agent_count` out of `[1, 50]`. |
+| `invalid_realm_id`           | `400` | `realm_id` supplied but fails `^[a-zA-Z0-9_-]{1,64}$`. |
+| `adapter_unknown`            | `400` | `adapter_hint` not registered. `details.supported_adapters` lists the registered names. |
+| `realm_id_conflict`          | `409` | `realm_id` has an active (non-terminal) spin job. `details.existing_job_id` identifies it. |
+| `realm_manager_unavailable`  | `503` | Readiness registry reports `realm_manager.ready == false`. |
+| `job_not_found`              | `404` | `GET /realms/{job_id}` with an unknown id. |
+| `adapter_error`              | _on job surface_ | Adapter raised; surfaces as terminal `phase: "failed"` + populated `error` on `GET /realms/{job_id}`. `details.exc_type` names the exception class; `details.traceback_preview` carries the last 500 chars of the traceback. |
+| `internal`                   | _on job surface_ | Defensive catch-all at the top of `_run_spin_job`. Same surface as `adapter_error`. |
+
+Worked examples:
+
+```json
+// 400 validation_failed
+{ "code": "validation_failed", "message": "realm_description must be between 1 and 2000 chars", "details": { "field": "realm_description" } }
+
+// 400 adapter_unknown
+{ "code": "adapter_unknown", "message": "adapter 'aws' is not registered", "details": { "supported_adapters": ["local-noop"] } }
+
+// 409 realm_id_conflict
+{ "code": "realm_id_conflict", "message": "realm_id 'demo-a' already has an active spin job", "details": { "existing_job_id": "c7d8e9f0-..." } }
+
+// 503 realm_manager_unavailable
+{ "code": "realm_manager_unavailable", "message": "realm manager has no adapters registered", "details": {} }
+```
+
+### Lifecycle — phase semantics
+
+| Phase | Terminal? | Description |
+|---|---|---|
+| `validating`   | no  | Initial phase on 202. Adapter `validate()` runs; on `SpinValidationError` transitions to `failed`. |
+| `provisioning` | no  | Adapter `provision()` running. On any exception transitions to `failed`. |
+| `ready`        | yes | Adapter returned successfully. `outputs` is populated; `error` is `null`. |
+| `failed`       | yes | Validation failure, adapter exception, or internal crash. `outputs` is `{}`; `error` is populated. |
+
+Terminal phases are **immutable** — `_update_job` asserts the current
+phase is non-terminal before mutating, so a late poll never flips a
+`ready` job back to `provisioning`.
+
+---
+
+## `GET /realms/{job_id}`
+
+**Purpose.** Fetch full job state for a spin job enqueued by
+`POST /realms/spin`. Safe to call at any cadence; the canvas client
+(`frontend/hooks/useRealmSpin.ts`) polls every 750 ms with a 60 s
+wall-time cap.
+
+### Response — `200 OK`
+
+Pydantic model: `SpinJob`.
+
+```json
+{
+  "job_id":            "5f1c0b2e-...",
+  "realm_id":          "realm-5f1c0b2e",
+  "phase":             "ready",
+  "adapter":           "local-noop",
+  "created_at":        "2026-04-18T10:12:44.117Z",
+  "updated_at":        "2026-04-18T10:12:44.627Z",
+  "realm_description": "finance-swarm prod",
+  "agent_count":       3,
+  "outputs": {
+    "mesh_endpoint": "noop://realm-5f1c0b2e",
+    "adapter":       "local-noop",
+    "agent_count":   3
+  },
+  "error":          null,
+  "schema_version": 3
+}
+```
+
+Field semantics:
+
+- `updated_at` advances **monotonically** on every phase transition.
+- `outputs` is populated **only** when `phase == "ready"`; it is `{}`
+  for non-terminal phases.
+- `error` is `null` on any non-`failed` phase; populated on `failed`
+  (same `SpinError` shape as the error envelope above).
+
+### Response — `404 Not Found`
+
+Unknown `job_id`:
+
+```json
+{
+  "code":    "job_not_found",
+  "message": "no spin job with id 'xxx' is registered",
+  "details": { "job_id": "xxx" }
+}
+```
+
+### Readiness & operator visibility
+
+- `dependencies.realm_manager` / `checks.realm_manager` — probe is
+  `ready: true` iff at least one adapter is registered in the
+  `_ADAPTERS` dict. `required: true` — the supervisor goes `degraded`
+  (HTTP 503 on `/health`) if no adapters are registered.
+- `_SPIN_JOBS: dict[str, SpinJob]` is **in-process**. Multi-replica
+  deployment requires a shared backend (Redis / Postgres); documented
+  follow-up, same caveat as `_CONNECTIONS` in the realtime block.
+- Two structured log lines per job: `realm.spin.accept` on POST,
+  `realm.spin.done` on terminal phase (includes `phase`, `duration_s`,
+  `error_code`).
+
+### Worked example — spin + poll with `curl`
+
+```bash
+# 1. Enqueue the job
+JOB=$(curl -s -X POST http://localhost:8000/realms/spin \
+  -H 'Content-Type: application/json' \
+  -d '{"realm_description":"smoke test","agent_count":3}' | jq -r .job_id)
+
+# 2. Poll until terminal (tight loop — production clients use 750 ms)
+for i in $(seq 1 20); do
+  curl -s http://localhost:8000/realms/$JOB | jq '{phase, updated_at, outputs, error}'
+  sleep 0.2
+done
+```
+
+---
+
 ## `WS /ws/realm/{realm_id}`
 
 **Purpose.** Live, server-push channel from Dirijor Core to the Private
@@ -375,6 +573,7 @@ Tests cover:
 - `test_consensus_smoke`, `test_consensus_degraded_keeps_v01_key_set`
 - `test_schema_version_pinned`, `test_schema_version_is_3` (fail loudly if someone bumps `SCHEMA_VERSION` without updating this page)
 - Story 3.3 WebSocket suite: `test_ws_accepts_valid_realm_id`, `test_ws_rejects_missing_realm_id`, `test_ws_rejects_malformed_realm_id`, `test_ws_rejects_forbidden_realm`, `test_ws_broadcast_reaches_only_matching_realm`, `test_ws_heartbeat_emitted_on_idle`, `test_ws_disconnect_cleans_up_registry`, `test_ws_close_1011_on_send_failure`
+- Story 2.1 realm-spin suite: `test_spin_accepts_valid_request_returns_202`, `test_spin_echoes_caller_provided_realm_id`, `test_spin_generates_realm_id_when_absent`, `test_spin_rejects_empty_description`, `test_spin_rejects_oversized_description`, `test_spin_rejects_invalid_realm_id`, `test_spin_rejects_unknown_adapter`, `test_spin_rejects_conflict_on_active_realm`, `test_spin_job_progresses_through_lifecycle`, `test_spin_failure_surfaces_structured_error`, `test_get_realm_job_404_on_unknown_id`, `test_health_includes_realm_manager_dep`, `test_schema_version_still_3`
 
 If any test fails, **this reference is out of date** — file a docs PR
 before merging the code PR that changed the contract.

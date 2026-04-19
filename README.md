@@ -197,6 +197,47 @@ Frontend wiring: set `NEXT_PUBLIC_DIRIJOR_WS_URL` to the base URL (e.g.
 canvas stays in `idle` mode so the UI is still runnable without a backend.
 See `frontend/.env.example` for the default local value.
 
+### Realm provisioning (Story 2.1)
+
+Story 2.1 adds the async realm-spin HTTP contract — the canvas "Spin realm"
+button now round-trips through the supervisor instead of a client-side
+`setTimeout` stub. The endpoint pair follows the same stability discipline
+as `/consensus` and `/ws`: closed `SpinError.code` enum, `ConfigDict(extra="forbid")`
+on every Pydantic model, additive-only response shapes. Adding the
+`realm_manager` readiness dep did **not** bump `SCHEMA_VERSION` (still `3`)
+— see the stability-policy row in
+[`docs/reference/supervisor-api.md`](docs/reference/supervisor-api.md) for
+the "dep-only additive" precedent.
+
+- **`POST /realms/spin`** — enqueue a job. Accepts
+  `{ realm_description, adapter_hint?, realm_id?, agent_count? }`; returns
+  **202** with `{ job_id, realm_id, phase: "validating", adapter, created_at, status_url, schema_version }`.
+  Structured errors: `400 validation_failed` / `400 invalid_realm_id` /
+  `400 adapter_unknown` / `409 realm_id_conflict` / `503 realm_manager_unavailable`.
+- **`GET /realms/{job_id}`** — poll job state. Returns `SpinJob` (`phase`
+  advances `validating → provisioning → ready | failed`; `updated_at` is
+  monotonic; `outputs` populated on `ready`, `error` populated on `failed`).
+  Unknown ids → `404 job_not_found`.
+- **Adapter abstraction.** v0.1 ships `LocalNoopAdapter` (simulates
+  provisioning with `PROVISION_DELAY_S = 0.5s`, returns
+  `mesh_endpoint: noop://<realm_id>`). Story 2.2 registers `TerraformAdapter`
+  behind the same `RealmAdapter` `Protocol`; Story 2.3 wraps `.provision`
+  with default-deny egress.
+
+```bash
+# Smoke: spin + poll
+JOB=$(curl -s -X POST http://localhost:8000/realms/spin \
+  -H 'Content-Type: application/json' \
+  -d '{"realm_description":"smoke test","agent_count":3}' | jq -r .job_id)
+curl -s http://localhost:8000/realms/$JOB | jq
+```
+
+Frontend wiring: set `NEXT_PUBLIC_DIRIJOR_API_URL` to the supervisor base
+URL (defaults to `http://localhost:8000` when unset). The client hook
+`useRealmSpin` polls `GET /realms/{job_id}` every 750 ms with a 60 s
+wall-time cap; on timeout it synthesizes a `poll_timeout` error so the UI
+never loops forever. See `frontend/.env.example`.
+
 ### Running the supervisor test suite
 
 From the repository root:

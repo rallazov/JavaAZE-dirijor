@@ -37,6 +37,18 @@
 #     (6 exactly); payload shapes inside each `type` are additive-only. WS
 #     close-code contract: 4401 invalid_realm_id, 4403 realm_forbidden,
 #     1011 internal/heartbeat-send-failed.
+#   v3 (Story 2.1, 2026-04-18 — dep-only additive) — Adds `realm_manager`
+#     entry to the readiness registry `checks` / `dependencies` map and
+#     introduces the `POST /realms/spin` + `GET /realms/{job_id}` HTTP
+#     surface with a closed `SpinError.code` envelope. SCHEMA_VERSION is
+#     INTENTIONALLY NOT BUMPED: adding a key to the readiness registry is
+#     the canonical additive extension (callers iterate the map by key, not
+#     a closed enum) and does not break strict parsers. Spin responses echo
+#     `schema_version: 3` for feature detection. The closed code enum is
+#     `validation_failed | invalid_realm_id | adapter_unknown
+#     | realm_id_conflict | realm_manager_unavailable | job_not_found
+#     | adapter_error | internal`; adding a new code requires updating
+#     `docs/reference/supervisor-api.md` in the same PR.
 
 from __future__ import annotations
 
@@ -44,15 +56,18 @@ import asyncio
 import logging
 import re
 import time
+import traceback
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, TypedDict
+from typing import Any, Callable, Literal, Protocol, TypedDict, get_args
 
-from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from langgraph.graph import END, StateGraph
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 logger = logging.getLogger("dirijor.supervisor")
 
@@ -60,6 +75,15 @@ logger = logging.getLogger("dirijor.supervisor")
 
 SERVICE_NAME = "dirijor-supervisor"
 SERVICE_VERSION = "0.1.0"
+# SCHEMA_VERSION intentionally stays at 3 after Story 2.1.
+# Rationale: Story 2.1 adds one new entry (`realm_manager`) to the
+# readiness-registry `checks`/`dependencies` map. Per the stability
+# policy in docs/reference/supervisor-api.md, callers iterate that
+# map by key — a new dependency entry is an ADDITIVE extension and
+# does NOT require a schema bump. Story 3.3 bumped 2 -> 3 because
+# it added a new top-level `realtime` block on RootStatus; 2.1 adds
+# no new top-level fields, so no bump is warranted. Precedent:
+# "dep-only additive" — see Story 2.1 Change Log + AC 6.
 SCHEMA_VERSION = 3
 STARTED_AT = time.monotonic()
 STARTUP_GRACE_S = 1.0
@@ -360,14 +384,28 @@ def _probe_realtime_channel() -> tuple[bool, str | None]:
     return True, None
 
 
+def _probe_realm_manager() -> tuple[bool, str | None]:
+    # Story 2.1 probe: structural check that at least one realm adapter has
+    # been registered. `_ADAPTERS` is defined later in the Story 2.1 block;
+    # the probe is only invoked at request time (FastAPI handler or `/health`
+    # poll), well after module import, so the forward reference is safe.
+    if not _ADAPTERS:
+        return False, "no adapters registered"
+    return True, None
+
+
 # Story 3.2 AC 8: REGISTRY consensus wiring is intentionally unchanged — the
 # debate-loop readiness still rides on `graph_compiled` / `consensus_engine`.
 # Story 3.3 AC 7: `realtime_channel` added between `consensus_engine` and
 # `semantic_cache` so operators see Canvas wiring before future-state deps.
+# Story 2.1 AC 6: `realm_manager` added between `realtime_channel` and
+# `semantic_cache`. SCHEMA_VERSION intentionally NOT bumped — see the block
+# comment above `SCHEMA_VERSION = 3` for the full rationale.
 REGISTRY: list[DependencyCheck] = [
     DependencyCheck("graph_compiled", True, _probe_graph_compiled),
     DependencyCheck("consensus_engine", True, _probe_graph_compiled),
     DependencyCheck("realtime_channel", True, _probe_realtime_channel),
+    DependencyCheck("realm_manager", True, _probe_realm_manager),
     DependencyCheck("semantic_cache", False, _probe_semantic_cache),
     DependencyCheck("mesh", False, _probe_mesh),
 ]
@@ -408,6 +446,16 @@ def _aggregate_status(checks: dict[str, dict], uptime_s: float) -> str:
 
 def _uptime_seconds() -> float:
     return round(time.monotonic() - STARTED_AT, 3)
+
+
+def _iso_now() -> str:
+    """ISO-8601 UTC timestamp with a trailing `Z`.
+
+    Shared helper used by the `/health` payload, the Story 3.3 realtime
+    envelope (`_send_envelope`), and the Story 2.1 spin job state machine
+    so every outbound timestamp uses the same format.
+    """
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 # --- Pydantic response models (health / root contract surface) ---------------
@@ -538,7 +586,7 @@ def health():
         version=SERVICE_VERSION,
         schema_version=SCHEMA_VERSION,
         uptime_s=uptime,
-        timestamp=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        timestamp=_iso_now(),
         checks={name: DependencyStatus(**entry) for name, entry in checks.items()},
     )
     required_ok = all(
@@ -715,6 +763,707 @@ def run_consensus(
     return payload
 
 
+# --- Realm spin (Story 2.1) --------------------------------------------------
+#
+# Canvas + agent-wrapper HTTP surface for Private Realm provisioning (Epic 2).
+# Ships:
+#   - closed `SpinError.code` envelope shape for every non-2xx path;
+#   - `SpinRequest` / `SpinResponse` / `SpinJob` Pydantic v2 models with
+#     `ConfigDict(extra="forbid")` so unknown keys 400 early;
+#   - `SpinPhase = validating -> provisioning -> ready | failed` state
+#     machine with terminal-phase immutability guarded by `_update_job`;
+#   - `RealmAdapter` Protocol seam + `LocalNoopAdapter` v0.1 adapter; Story
+#     2.2 drops `TerraformAdapter` into `_ADAPTERS`, Story 2.3 wraps the
+#     `provision` call with default-deny egress policy application;
+#   - `_SPIN_JOBS` / `_JOB_BY_REALM` in-process registries (same multi-worker
+#     caveat as `_CONNECTIONS` — Redis / Postgres is a documented follow-up);
+#   - `POST /realms/spin` + `GET /realms/{job_id}` routes. Structured errors
+#     are emitted via `JSONResponse(..., content=SpinError(...).model_dump())`
+#     so the envelope shape is invariant across every 4xx / 5xx branch
+#     (`HTTPException` wraps content in `{"detail": ...}` and is NOT used).
+#
+# Out of scope for 2.1 (explicit follow-ups tracked in the story file):
+#   - `DELETE /realms/{job_id}` cancellation (adapter-level cleanup — 2.2).
+#   - WS streaming of `realm.spin.phase` via `broadcast_event` (requires a
+#     SCHEMA_VERSION bump; deferred until canvas UX needs push progress).
+#   - Multi-worker / persistent job storage (Redis / Postgres).
+#   - Authentication on `/realms/*` (loopback-only in v0.1).
+
+
+SpinPhase = Literal["validating", "provisioning", "ready", "failed"]
+
+# v0.1 closed enum of `SpinError.code` values. Adding a new code is an
+# additive change and MUST be documented in docs/reference/supervisor-api.md
+# in the same PR. Frontend-only codes (`network_error`, `bad_response`,
+# `poll_timeout`) live in `frontend/lib/dirijor-api.ts` and are NOT part of
+# this backend enum — see the JSDoc at the top of that module.
+#
+# The closed enum is enforced at runtime three ways:
+#   1. `SpinError.code` is typed `SpinErrorCode` (Pydantic rejects anything
+#      outside the `Literal`).
+#   2. `SpinValidationError.__init__` asserts `code in _SPIN_ERROR_CODES`.
+#   3. `_SPIN_ERROR_CODES` is derived from `SpinErrorCode` via `get_args`
+#      so the tuple and the Literal cannot drift.
+SpinErrorCode = Literal[
+    "validation_failed",
+    "invalid_realm_id",
+    "adapter_unknown",
+    "realm_id_conflict",
+    "realm_manager_unavailable",
+    "job_not_found",
+    "adapter_error",
+    "internal",
+]
+_SPIN_ERROR_CODES: tuple[str, ...] = get_args(SpinErrorCode)
+
+# Module constant — monkeypatched to `0.01` in the lifecycle test so the
+# bounded poll loop resolves in < 0.3s. In production, 0.5s gives the canvas
+# visible `validating -> provisioning -> ready` transitions under the noop
+# adapter without a real IaC backend.
+PROVISION_DELAY_S = 0.5
+
+_TERMINAL_PHASES: tuple[SpinPhase, ...] = ("ready", "failed")
+
+
+class SpinError(BaseModel):
+    """Canonical non-2xx envelope on every spin HTTP path.
+
+    `code` is drawn from the closed `SpinErrorCode` `Literal` (Pydantic
+    rejects any other value at validation time — the closed enum is
+    enforced, not just documented). `message` is human-readable. `details`
+    is an open map (e.g. `supported_adapters` on `adapter_unknown`,
+    `existing_job_id` on `realm_id_conflict`, `exc_type` +
+    `traceback_preview` on `adapter_error`) and is coerced through
+    `jsonable_encoder` so adapter-supplied non-JSON-primitive values
+    (datetime, set, bytes, custom objects) do not 500 the response
+    serializer and break the closed envelope contract.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: SpinErrorCode
+    message: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("details", mode="before")
+    @classmethod
+    def _coerce_details(cls, value: Any) -> dict[str, Any]:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise TypeError(
+                f"SpinError.details must be a dict, got {type(value).__name__}"
+            )
+        return jsonable_encoder(value)
+
+
+class SpinRequest(BaseModel):
+    """`POST /realms/spin` request body.
+
+    `realm_description` is required. `adapter_hint` defaults to the
+    `local-noop` adapter when omitted (see `_resolve_adapter`). `realm_id`
+    is server-minted with a `realm-<uuid12>` prefix when omitted;
+    otherwise it must match `^[a-zA-Z0-9_-]{1,64}$` (same grammar as the
+    WS `_REALM_ID_RE` from Story 3.3). `agent_count` is bounded to
+    `[1, 50]` so obvious misuse fails validation before the adapter runs.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    realm_description: str = Field(min_length=1, max_length=2000)
+    adapter_hint: str | None = None
+    realm_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_-]{1,64}$")
+    agent_count: int = Field(default=3, ge=1, le=50)
+
+    @field_validator("realm_description")
+    @classmethod
+    def _description_not_whitespace_only(cls, value: str) -> str:
+        # Pydantic's `min_length=1` counts raw characters, so `"   "` or
+        # `"\n"` pass and produce a meaningless job description. Strip-test
+        # here so the caller sees a structured `validation_failed` envelope
+        # (via the RequestValidationError handler below) instead of a
+        # blank-description job landing in the registry.
+        if not value.strip():
+            raise ValueError(
+                "realm_description must contain at least one non-whitespace character"
+            )
+        return value
+
+
+class SpinResponse(BaseModel):
+    """`POST /realms/spin` 202 response body.
+
+    Strict shape (AC 1): `job_id`, `realm_id`, `phase`, `adapter`,
+    `created_at`, `status_url`, `schema_version`. The initial `phase` is
+    ALWAYS `"validating"` — phase progression requires a subsequent poll
+    of `GET /realms/{job_id}`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str
+    realm_id: str
+    phase: SpinPhase
+    adapter: str
+    created_at: str
+    status_url: str
+    schema_version: int
+
+
+class SpinJob(BaseModel):
+    """Full lifecycle state of a spin job, returned by `GET /realms/{job_id}`.
+
+    `outputs` is `{}` on every non-terminal poll and populated only when
+    `phase == "ready"`. `error` is `null` on every non-`failed` poll and
+    populated on terminal `failed`. `updated_at` advances monotonically on
+    every phase transition (guarded by `_update_job`).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str
+    realm_id: str
+    phase: SpinPhase
+    adapter: str
+    created_at: str
+    updated_at: str
+    realm_description: str
+    agent_count: int
+    outputs: dict[str, Any] = Field(default_factory=dict)
+    error: SpinError | None = None
+    schema_version: int
+
+
+# --- Realm adapter seam ------------------------------------------------------
+
+
+class SpinValidationError(Exception):
+    """Raised by an adapter's `validate` method when the request is rejected
+    for adapter-specific reasons. The runner converts this into a terminal
+    `failed` phase with a `SpinError(code=<exc.code>, ...)` attached.
+
+    `code` is asserted against the closed `_SPIN_ERROR_CODES` enum at
+    construction time so an adapter that invents a new code (e.g.
+    "quota_exceeded") fails loudly in tests instead of silently
+    propagating onto the wire and breaking the documented contract.
+    """
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        if code not in _SPIN_ERROR_CODES:
+            raise ValueError(
+                f"SpinValidationError.code {code!r} not in closed enum "
+                f"{_SPIN_ERROR_CODES}"
+            )
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.details = details or {}
+
+
+class RealmAdapter(Protocol):
+    """Typed structural seam for realm-provisioning adapters.
+
+    Story 2.2 will register `TerraformAdapter`; Story 2.3 wraps the
+    `provision` call with default-deny egress policy application. The
+    registry (`_ADAPTERS`) is closed in v0.1 — future stories extend it
+    via a module-level `register_adapter(name, instance)` call at import
+    time (explicitly NOT a runtime env-var / plugin-loader mechanism).
+    """
+
+    name: str
+
+    async def validate(self, req: SpinRequest) -> None: ...
+
+    async def provision(
+        self, req: SpinRequest, job: SpinJob
+    ) -> dict[str, Any]: ...
+
+
+class LocalNoopAdapter:
+    """v0.1 no-op adapter — validates `agent_count`, sleeps
+    `PROVISION_DELAY_S`, returns a synthetic `noop://` mesh endpoint.
+    Intentionally trivial so Story 2.1 can ship the contract without a
+    real IaC backend; Story 2.2 replaces it with `TerraformAdapter`.
+    """
+
+    name = "local-noop"
+
+    async def validate(self, req: SpinRequest) -> None:
+        if not (1 <= req.agent_count <= 50):
+            raise SpinValidationError(
+                code="validation_failed",
+                message="agent_count must be in [1, 50]",
+                details={"field": "agent_count", "given": req.agent_count},
+            )
+
+    async def provision(
+        self, req: SpinRequest, job: SpinJob
+    ) -> dict[str, Any]:
+        await asyncio.sleep(PROVISION_DELAY_S)
+        return {
+            "mesh_endpoint": f"noop://{job.realm_id}",
+            "adapter": self.name,
+            "agent_count": req.agent_count,
+        }
+
+
+# Story 2.2 will register TerraformAdapter here; Story 2.3 will wrap
+# .provision with a default-deny egress policy decorator.
+_ADAPTERS: dict[str, RealmAdapter] = {
+    LocalNoopAdapter.name: LocalNoopAdapter(),
+}
+
+
+# --- Job registry + state machine -------------------------------------------
+
+
+# In-process only. Multi-replica deployment requires Redis / Postgres —
+# flagged as a documented follow-up (same posture as `_CONNECTIONS`); do NOT
+# pre-introduce a persistence layer without a dedicated story.
+_SPIN_JOBS: dict[str, SpinJob] = {}
+
+# Map `realm_id -> job_id` for ACTIVE (non-terminal) jobs only. Used by the
+# 409 conflict check. Entries are removed when the job reaches `ready` or
+# `failed` (guarded `.pop(..., None)` in the `finally:` block of
+# `_run_spin_job`).
+_JOB_BY_REALM: dict[str, str] = {}
+
+# Strong references to running `_run_spin_job` tasks. `asyncio.create_task`
+# returns a task that the event loop only holds a WEAK reference to (see
+# the `asyncio.create_task` "Important" note — gotcha since Python 3.11),
+# so the task can be garbage-collected mid-execution if the returned
+# handle is dropped. Storing every live task here keeps them alive; the
+# done-callback removes the entry so the set does not grow unboundedly.
+_RUNNING_SPIN_TASKS: set[asyncio.Task] = set()
+
+
+def _mint_realm_id() -> str:
+    """Generate a server-side `realm_id` that matches `_REALM_ID_RE`."""
+    return f"realm-{uuid.uuid4().hex[:12]}"
+
+
+def _resolve_adapter(hint: str | None) -> RealmAdapter:
+    """Resolve a registered adapter by hint; fall back to `local-noop`.
+
+    Raises `KeyError(name)` if a non-None hint is supplied but not
+    registered — the HTTP handler translates that into an `adapter_unknown`
+    `SpinError`. Fail-fast on an unknown hint (not a silent default
+    fallback) so misconfiguration surfaces immediately — mirrors the
+    `broadcast_event` fail-fast pattern from Story 3.3's code-review patch.
+
+    Note: `None` (omitted hint) defaults to `local-noop`, but an empty
+    string `""` is treated as a user-supplied unknown hint and raises
+    `KeyError("")` so a buggy client cannot silently coerce to the noop
+    adapter via Python's truthiness on `hint or default`.
+    """
+    name = LocalNoopAdapter.name if hint is None else hint
+    adapter = _ADAPTERS.get(name)
+    if adapter is None:
+        raise KeyError(name)
+    return adapter
+
+
+def _update_job(
+    job: SpinJob,
+    *,
+    phase: SpinPhase,
+    error: SpinError | None = None,
+    outputs: dict[str, Any] | None = None,
+) -> SpinJob:
+    """Pure helper: advance a job's phase + `updated_at`, optionally attach
+    `error` / `outputs`. Terminal phases (`ready`, `failed`) are immutable
+    by contract — mutating one raises `RuntimeError` so regressions surface
+    loudly in tests (AC 4).
+    """
+    if job.phase in _TERMINAL_PHASES:
+        raise RuntimeError(
+            f"_update_job: refusing to mutate terminal job "
+            f"{job.job_id} (phase={job.phase})"
+        )
+    job.phase = phase
+    job.updated_at = _iso_now()
+    if error is not None:
+        job.error = error
+    if outputs is not None:
+        job.outputs = outputs
+    return job
+
+
+def _log_job_done(
+    job: SpinJob, started_monotonic: float, error_code: str | None
+) -> None:
+    """Emit one `realm.spin.done` INFO line on any terminal transition."""
+    logger.info(
+        "realm.spin.done",
+        extra={
+            "event": "realm.spin.done",
+            "job_id": job.job_id,
+            "phase": job.phase,
+            "duration_s": round(time.monotonic() - started_monotonic, 3),
+            "error_code": error_code,
+        },
+    )
+
+
+# TODO(6.1): wrap `_run_spin_job` in an OTel span once Story 6.1 lands.
+async def _run_spin_job(
+    job: SpinJob, req: SpinRequest, adapter: RealmAdapter
+) -> None:
+    """Deterministic phase machine: `validating -> provisioning -> ready|failed`.
+
+    Exception routing:
+      - `asyncio.CancelledError` is re-raised so cooperative cancellation
+        (event-loop shutdown, TestClient teardown, uvicorn reload) works.
+      - `SpinValidationError` from the adapter terminates the job with
+        the adapter-reported `code`.
+      - Any other exception raised inside an adapter call (`validate` or
+        `provision`) surfaces as `code="adapter_error"`.
+      - Any other exception raised OUTSIDE an adapter call (e.g. a future
+        `_update_job` regression, logger misconfiguration) surfaces as
+        `code="internal"`.
+      - Registry cleanup (`_JOB_BY_REALM.pop`) and `_log_job_done` run in
+        a `finally:` block so a realm_id is never permanently 409-locked
+        on a recovery-path regression.
+
+    The bounded (500-char) `traceback_preview` in `SpinError.details`
+    caps response body size so operators can diagnose from
+    `GET /realms/{job_id}` alone. It is NOT a secret-scrubber — if a
+    secret appears in the exception message or final frames it will
+    surface; callers relying on secret-safety must add scrubbing at the
+    adapter boundary.
+    """
+    started = time.monotonic()
+    terminal_code: str | None = None
+    # `error_source` tracks the call that raised. Only an adapter call
+    # produces `adapter_error`; everything else is `internal`. See the
+    # docstring above for the full routing table.
+    error_source: str = "pre-adapter"
+    try:
+        try:
+            error_source = "adapter.validate"
+            await adapter.validate(req)
+        except SpinValidationError as exc:
+            _update_job(
+                job,
+                phase="failed",
+                error=SpinError(
+                    code=exc.code,
+                    message=exc.message,
+                    details=exc.details,
+                ),
+            )
+            terminal_code = exc.code
+            return
+
+        error_source = "post-validate"
+        _update_job(job, phase="provisioning")
+
+        error_source = "adapter.provision"
+        outputs = await adapter.provision(req, job)
+        if not isinstance(outputs, dict):
+            # Keep `error_source == "adapter.provision"` so the outer
+            # `except` attributes this to the adapter (adapter_error),
+            # not to the post-provision code path (internal).
+            raise RuntimeError(
+                f"adapter {adapter.name!r}.provision returned "
+                f"{type(outputs).__name__}, expected dict"
+            )
+
+        error_source = "post-provision"
+        _update_job(job, phase="ready", outputs=outputs)
+    except asyncio.CancelledError:
+        # Cooperative cancellation: re-raise so the event loop can reap
+        # the task. The `finally:` block still releases the realm_id so
+        # a subsequent spin of the same realm_id is not 409-blocked.
+        raise
+    except Exception as exc:
+        logger.exception(
+            "realm.spin.crash",
+            extra={
+                "event": "realm.spin.crash",
+                "job_id": job.job_id,
+                "realm_id": job.realm_id,
+                "adapter": adapter.name,
+                "error_source": error_source,
+            },
+        )
+        # Cap the preview to keep the response body small — NOT a
+        # secret-scrubber; see the function docstring.
+        tb_preview = traceback.format_exc()[-500:]
+        code: SpinErrorCode = (
+            "adapter_error" if error_source.startswith("adapter.") else "internal"
+        )
+        if job.phase not in _TERMINAL_PHASES:
+            _update_job(
+                job,
+                phase="failed",
+                error=SpinError(
+                    code=code,
+                    message=str(exc),
+                    details={
+                        "exc_type": type(exc).__name__,
+                        "traceback_preview": tb_preview,
+                    },
+                ),
+            )
+            terminal_code = code
+        # Deliberately do NOT re-raise for non-cancel exceptions —
+        # propagating from a background task would orphan the job in a
+        # non-terminal phase. The failure is now encoded in job state.
+    finally:
+        # Unconditional cleanup: even if `_update_job` / `logger.exception`
+        # itself raised above, the realm_id must be released so the next
+        # spin with the same realm_id is not permanently 409-locked.
+        _JOB_BY_REALM.pop(job.realm_id, None)
+        _log_job_done(job, started, terminal_code)
+
+
+# --- HTTP routes -------------------------------------------------------------
+
+
+def _spin_error_response(
+    status_code: int,
+    code: str,
+    message: str,
+    details: dict[str, Any] | None = None,
+) -> JSONResponse:
+    """Emit a `SpinError` `JSONResponse`.
+
+    `HTTPException` is NOT used here because its default body shape is
+    `{"detail": ...}`, which would violate the closed-envelope contract
+    (AC 2). Every 4xx / 5xx path MUST route through this helper.
+    """
+    payload = SpinError(
+        code=code, message=message, details=details or {}
+    ).model_dump()
+    return JSONResponse(status_code=status_code, content=payload)
+
+
+@app.post(
+    "/realms/spin",
+    response_model=SpinResponse,
+    status_code=202,
+    responses={
+        400: {
+            "model": SpinError,
+            "description": "Validation or adapter lookup failure.",
+        },
+        409: {
+            "model": SpinError,
+            "description": "A non-terminal job already holds this realm_id.",
+        },
+        503: {
+            "model": SpinError,
+            "description": "Realm manager readiness probe reports not-ready.",
+        },
+    },
+)
+async def spin_realm(req: SpinRequest) -> Any:
+    """Accept a realm spin intent, enqueue a background job, return 202.
+
+    Validation order (actual runtime order; AC 2 codes map as described):
+      1. FastAPI runs Pydantic validation on `SpinRequest` BEFORE the
+         handler body. The `RequestValidationError` handler installed at
+         module scope translates those 422s into 400 + `SpinError` with
+         `code="invalid_realm_id"` for `realm_id` pattern/length
+         violations and `code="validation_failed"` for everything else
+         (description length, whitespace-only, `agent_count` bounds,
+         unknown keys via `extra="forbid"`).
+      2. `realm_manager` readiness probe → 503 on degraded.
+      3. Adapter resolution → 400 `adapter_unknown` on unregistered hint
+         (including the empty-string case — see `_resolve_adapter`).
+      4. Conflict check → 409 on an active job for the same `realm_id`.
+      5. Mint job, register, fire background task, return 202.
+
+    The handler no longer re-checks `realm_id` against `_REALM_ID_RE`
+    because Pydantic + the validation-error handler cover that path
+    completely; a separate guard would be dead code.
+    """
+    ready, detail = _probe_realm_manager()
+    if not ready:
+        return _spin_error_response(
+            503,
+            "realm_manager_unavailable",
+            detail or "realm_manager is not ready",
+        )
+
+    try:
+        adapter = _resolve_adapter(req.adapter_hint)
+    except KeyError:
+        return _spin_error_response(
+            400,
+            "adapter_unknown",
+            f"adapter {req.adapter_hint!r} is not registered",
+            {"supported_adapters": sorted(_ADAPTERS.keys())},
+        )
+
+    realm_id = req.realm_id or _mint_realm_id()
+
+    existing_job_id = _JOB_BY_REALM.get(realm_id)
+    if existing_job_id is not None:
+        return _spin_error_response(
+            409,
+            "realm_id_conflict",
+            f"realm_id {realm_id!r} already has an active spin job",
+            {"existing_job_id": existing_job_id},
+        )
+
+    job_id = str(uuid.uuid4())
+    now = _iso_now()
+    job = SpinJob(
+        job_id=job_id,
+        realm_id=realm_id,
+        phase="validating",
+        adapter=adapter.name,
+        created_at=now,
+        updated_at=now,
+        realm_description=req.realm_description,
+        agent_count=req.agent_count,
+        outputs={},
+        error=None,
+        schema_version=SCHEMA_VERSION,
+    )
+    _SPIN_JOBS[job_id] = job
+    _JOB_BY_REALM[realm_id] = job_id
+
+    logger.info(
+        "realm.spin.accept",
+        extra={
+            "event": "realm.spin.accept",
+            "job_id": job_id,
+            "realm_id": realm_id,
+            "adapter": adapter.name,
+        },
+    )
+
+    # Store a strong reference so the event loop cannot GC the task
+    # mid-execution. `discard` is used as the done-callback so the set
+    # cannot leak entries across the process lifetime.
+    task = asyncio.create_task(_run_spin_job(job, req, adapter))
+    _RUNNING_SPIN_TASKS.add(task)
+    task.add_done_callback(_RUNNING_SPIN_TASKS.discard)
+
+    return SpinResponse(
+        job_id=job_id,
+        realm_id=realm_id,
+        phase="validating",
+        adapter=adapter.name,
+        created_at=now,
+        status_url=f"/realms/{job_id}",
+        schema_version=SCHEMA_VERSION,
+    )
+
+
+@app.get(
+    "/realms/{job_id}",
+    response_model=SpinJob,
+    responses={404: {"model": SpinError}},
+)
+async def get_realm_job(job_id: str) -> Any:
+    """Return the current lifecycle state of a spin job, or 404."""
+    job = _SPIN_JOBS.get(job_id)
+    if job is None:
+        return _spin_error_response(
+            404,
+            "job_not_found",
+            f"no spin job with id {job_id!r} is registered",
+            {"job_id": job_id},
+        )
+    return job
+
+
+# String-prefix match on request.url.path; scoped to the Story 2.1
+# endpoints so the Story 3.2 /consensus surface keeps its default
+# Pydantic 422 body (tests in that block rely on it).
+_SPIN_PATH_PREFIX = "/realms/"
+
+# Pydantic v2 error `type` values that map to the closed
+# `invalid_realm_id` code when they fire on the `realm_id` field.
+_REALM_ID_ERROR_TYPES = frozenset(
+    {
+        "string_pattern_mismatch",
+        "string_too_long",
+        "string_too_short",
+        "string_type",
+    }
+)
+
+
+def _classify_validation_error(
+    errors: list[dict[str, Any]],
+) -> SpinErrorCode:
+    """Map a Pydantic v2 validation-error batch to the closed SpinError
+    enum. If any error targets `realm_id` with a string-shape failure,
+    the whole batch is classified as `invalid_realm_id`; otherwise
+    `validation_failed` covers everything else (length, whitespace,
+    agent_count bounds, unknown keys via `extra="forbid"`)."""
+    for err in errors:
+        loc = err.get("loc") or ()
+        if not loc:
+            continue
+        # For POST body validation, `loc` is `("body", <field>, ...)`.
+        # The field name is the first non-"body" element.
+        field_loc = tuple(part for part in loc if part != "body")
+        if field_loc and field_loc[0] == "realm_id":
+            err_type = str(err.get("type", ""))
+            if err_type in _REALM_ID_ERROR_TYPES:
+                return "invalid_realm_id"
+    return "validation_failed"
+
+
+@app.exception_handler(RequestValidationError)
+async def _spin_validation_exception_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """Translate Pydantic's default 422 into 400 + `SpinError` envelope
+    on the Story 2.1 `/realms/*` surface (AC 2).
+
+    Non-spin endpoints keep FastAPI's default 422 `{"detail": [...]}`
+    body so the Story 3.2 `/consensus` tests (which accept the default
+    shape) are unaffected.
+
+    Pydantic-level triggers that now surface as `SpinError`:
+      - empty / missing / oversized / whitespace-only `realm_description`
+        → `code="validation_failed"`
+      - out-of-range `agent_count` (via `ge=1`, `le=50`)
+        → `code="validation_failed"`
+      - unknown keys (via `ConfigDict(extra="forbid")`)
+        → `code="validation_failed"`
+      - malformed `realm_id` (pattern/length)
+        → `code="invalid_realm_id"`
+    """
+    if not request.url.path.startswith(_SPIN_PATH_PREFIX):
+        # Preserve FastAPI's default for non-spin endpoints.
+        return JSONResponse(
+            status_code=422,
+            content={"detail": jsonable_encoder(exc.errors())},
+        )
+
+    errors = list(exc.errors())
+    code = _classify_validation_error(errors)
+    first_msg = errors[0].get("msg", "request body failed validation") if errors else (
+        "request body failed validation"
+    )
+    details = {
+        "errors": jsonable_encoder(
+            [
+                {
+                    "loc": list(e.get("loc", ())),
+                    "type": e.get("type", ""),
+                    "msg": e.get("msg", ""),
+                }
+                for e in errors
+            ]
+        )
+    }
+    return _spin_error_response(400, code, str(first_msg), details)
+
+
 # --- Realtime WebSocket channel (Story 3.3) ----------------------------------
 #
 # Canvas ↔ Core real-time transport. v0.1 is ONE-WAY Core → Canvas; client →
@@ -729,8 +1478,10 @@ def run_consensus(
 # — all outbound frames MUST go through the shared envelope / error path so
 # logging, eviction, and `seq` monotonicity stay consistent.
 #
-# TODO(refactor): split realtime section into realtime.py when supervisor.py
-# grows past ~700 lines (Story 4.2 will likely push us there).
+# TODO(refactor): supervisor.py > 1200 lines post-Story 2.1; split into
+# consensus.py + realtime.py + spin.py when Story 4.2 or 6.1 land. Do NOT
+# pre-split — a refactor mid-story adds risk; the split is a dedicated
+# follow-up.
 
 
 class RealtimeEnvelope(BaseModel):
@@ -787,12 +1538,6 @@ def _authorize_realm(realm_id: str) -> tuple[bool, str | None]:
     return True, None
 
 
-def _ws_timestamp() -> str:
-    """ISO-8601 UTC timestamp with trailing `Z` (matches `/health.timestamp`)."""
-
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
 async def _send_envelope(
     session: _WsSession, type_: str, payload: dict[str, Any]
 ) -> None:
@@ -810,7 +1555,7 @@ async def _send_envelope(
         "type": type_,
         "schema_version": SCHEMA_VERSION,
         "realm_id": session.realm_id,
-        "ts": _ws_timestamp(),
+        "ts": _iso_now(),
         "seq": session.seq,
         "payload": payload,
     }
