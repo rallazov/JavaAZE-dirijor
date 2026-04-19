@@ -41,7 +41,8 @@ debate loop and bumped `schema_version` from 1 → 2 (additive — v0.1 keys
 preserved). Story 3.3 added a WebSocket channel for live canvas updates and
 bumped `schema_version` from 2 → 3 (additive — all v2 keys preserved; `GET /`
 gains a `realtime` block and `GET /health` gains a `realtime_channel`
-dependency).
+dependency). Story 4.1 adds verified semantic cache HTTP surfaces and bumps
+`schema_version` to **5** (additive — all prior keys preserved).
 
 - `GET /` — service identity + aggregate status + per-dependency readiness.
 - `GET /health` — same dependency map, `timestamp`, and HTTP **200** when every
@@ -59,14 +60,16 @@ dependency).
 {
   "service": "dirijor-supervisor",
   "version": "0.1.0",
-  "schema_version": 2,
+  "schema_version": 5,
   "status": "operational",
   "consensus_engine": "ready",
   "uptime_s": 12.4,
   "dependencies": {
     "graph_compiled":    { "ready": true,  "required": true,  "detail": null },
     "consensus_engine":  { "ready": true,  "required": true,  "detail": null },
-    "semantic_cache":    { "ready": false, "required": false, "detail": "planned — see Story 4.1" },
+    "realtime_channel":  { "ready": true,  "required": true,  "detail": null },
+    "realm_manager":     { "ready": true,  "required": true,  "detail": null },
+    "semantic_cache":    { "ready": false, "required": false, "detail": "not configured" },
     "mesh":              { "ready": false, "required": false, "detail": "planned — see Story 5.1" }
   }
 }
@@ -78,13 +81,15 @@ dependency).
 {
   "status": "ok",
   "version": "0.1.0",
-  "schema_version": 2,
+  "schema_version": 5,
   "uptime_s": 12.4,
   "timestamp": "2026-04-16T10:12:44.117Z",
   "checks": {
     "graph_compiled":    { "ready": true,  "required": true,  "detail": null },
     "consensus_engine":  { "ready": true,  "required": true,  "detail": null },
-    "semantic_cache":    { "ready": false, "required": false, "detail": "planned — see Story 4.1" },
+    "realtime_channel":  { "ready": true,  "required": true,  "detail": null },
+    "realm_manager":     { "ready": true,  "required": true,  "detail": null },
+    "semantic_cache":    { "ready": false, "required": false, "detail": "not configured" },
     "mesh":              { "ready": false, "required": false, "detail": "planned — see Story 5.1" }
   }
 }
@@ -122,6 +127,8 @@ Response — threshold reached (HTTP 200):
   "messages": ["Is the staging DB patched?"],
   "consensus_score": 1.0,
   "verified_facts": [],
+  "semantic_cache_status": "skipped",
+  "semantic_cache_reason": "query_vector_missing",
   "decision": "yes",
   "votes": [
     { "agent_id": "grok",   "opinion": "yes", "confidence": 0.9,  "round": 1 },
@@ -143,6 +150,8 @@ not the HTTP code):
   "messages": ["Is the staging DB patched?"],
   "consensus_score": 0.3333,
   "verified_facts": [],
+  "semantic_cache_status": "skipped",
+  "semantic_cache_reason": "query_vector_missing",
   "decision": null,
   "votes": [
     { "agent_id": "a", "opinion": "yes",   "confidence": 1.0, "round": 1 },
@@ -204,7 +213,8 @@ button now round-trips through the supervisor instead of a client-side
 `setTimeout` stub. The endpoint pair follows the same stability discipline
 as `/consensus` and `/ws`: closed `SpinError.code` enum, `ConfigDict(extra="forbid")`
 on every Pydantic model, additive-only response shapes. Story 2.2 bumped
-`SCHEMA_VERSION` to `4` for the destroy route + expanded enum — see
+`SCHEMA_VERSION` to `4` (destroy route + SpinError extensions); Story 4.1
+bumped it to `5` (semantic-cache endpoints + consensus cache fields) — see
 [`docs/reference/supervisor-api.md`](docs/reference/supervisor-api.md).
 
 - **`POST /realms/spin`** — enqueue a job. Accepts

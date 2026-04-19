@@ -83,10 +83,11 @@ and [Concept — Consensus](../product/concepts/consensus.md).
 **Bindings today (v0.1).**
 
 - `/`, `/health`, `/consensus` hardened contract: shipped (Story 3.1).
-- Consensus debate loop: placeholder (`consensus_score = 0.97`).
-  Real loop is Story 3.2.
-- Verified semantic cache (Qdrant): planned, Story 4.1 — already
-  reported as `required: false, ready: false` in the readiness contract.
+- Consensus debate loop: shipped (Story 3.2 — real quorum + rounds).
+- Verified semantic cache (Qdrant): **Story 4.1** — `POST /semantic-cache/*`,
+  optional consensus augmentation via `query_vector` / `semantic_scope_id`,
+  live `semantic_cache` readiness probe (`required: false`; unconfigured URL
+  → `ready: false, detail: "not configured"`).
 - Anomaly auto-quarantine, audit export: Stories 4.2 / 4.3.
 
 ---

@@ -185,7 +185,7 @@ def test_registry_contains_required_dependencies():
     assert names["mesh"].required is False
 
     checks = supervisor.resolve_readiness()
-    assert checks["semantic_cache"]["detail"] == "planned — see Story 4.1"
+    assert checks["semantic_cache"]["detail"] == "not configured"
     assert checks["mesh"]["detail"] == "planned — see Story 5.1"
 
 
@@ -240,15 +240,15 @@ def test_schema_version_pinned():
     """Loud regression guard — bumping SCHEMA_VERSION requires deliberately
     updating this test AND README sample payloads (Story 3.1 AC 5,
     Story 3.2 AC 5, Story 3.3 AC 7, Story 2.2 AC 10)."""
-    assert supervisor.SCHEMA_VERSION == 4
+    assert supervisor.SCHEMA_VERSION == 5
     assert supervisor.SERVICE_VERSION == "0.1.0"
 
 
-def test_schema_version_is_4():
-    """Explicit belt-and-braces pin — Story 2.2 bumped 3 → 4. If a future
+def test_schema_version_is_5():
+    """Explicit belt-and-braces pin — Story 4.1 bumped 4 → 5. If a future
     story bumps SCHEMA_VERSION again, BOTH this test and
     `test_schema_version_pinned` must be updated together."""
-    assert supervisor.SCHEMA_VERSION == 4
+    assert supervisor.SCHEMA_VERSION == 5
 
 
 # --- Story 3.2 AC 1–4, AC 7 (new debate-loop coverage) ----------------------
@@ -260,6 +260,8 @@ _CONSENSUS_V2_KEYS = _CONSENSUS_V01_KEYS | {
     "termination_reason",
     "rounds",
     "threshold",
+    "semantic_cache_status",
+    "semantic_cache_reason",
 }
 
 
@@ -286,6 +288,8 @@ def test_consensus_reaches_threshold_one_round():
     assert body["threshold"] == 0.95
     assert body["messages"] == ["Is the staging DB patched?"]
     assert body["verified_facts"] == []
+    assert body["semantic_cache_status"] == "skipped"
+    assert body["semantic_cache_reason"] == "query_vector_missing"
     assert len(body["votes"]) == 3
     assert {v["round"] for v in body["votes"]} == {1}
 
@@ -1319,7 +1323,7 @@ def test_spin_terraform_adapter_accepts_and_returns_202(monkeypatch, tmp_path):
     assert response.status_code == 202
     body = response.json()
     assert body["adapter"] == "terraform-digitalocean"
-    assert body["schema_version"] == 4
+    assert body["schema_version"] == supervisor.SCHEMA_VERSION
 
 
 def test_spin_terraform_lifecycle_progresses_to_ready(monkeypatch, tmp_path):

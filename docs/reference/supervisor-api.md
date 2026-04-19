@@ -30,7 +30,7 @@ v0.1 supervisor exposes — no opinions, no recommendations. For the
 | Field | Value | Meaning |
 |---|---|---|
 | `SERVICE_VERSION` | `"0.1.0"` | Module constant; `FastAPI(version=...)` and every response read this. |
-| `SCHEMA_VERSION` | `4` | Contract shape version. Story 2.2 bumped 3→4 (`DELETE /realms/{job_id}` + destroy-related `outputs` keys + nine new `SpinError.code` values). Story 3.2 bumped 1→2 (debate loop), Story 3.3 bumped 2→3 (WebSocket channel + `realtime` block). Story 2.1 added the `realm_manager` readiness-registry dep without bumping — precedent for "dep-only additive" extensions. Story 2.3 added **`egress_policy_denied`** and Terraform egress controls **without** bumping `SCHEMA_VERSION` (env- and module-driven only). |
+| `SCHEMA_VERSION` | `5` | Contract shape version. Story 4.1 bumped 4→5: `POST /semantic-cache/ingest`, `POST /semantic-cache/query`, optional consensus cache fields (`query_vector`, `semantic_scope_id`, `semantic_cache_limit`, `semantic_cache_threshold`), populated `verified_facts` on `/consensus` 200, live `semantic_cache` readiness probe. Story 2.2 bumped 3→4 (`DELETE /realms/{job_id}` + destroy-related `outputs` keys + nine new `SpinError.code` values). Story 3.2 bumped 1→2 (debate loop), Story 3.3 bumped 2→3 (WebSocket channel + `realtime` block). Story 2.1 added the `realm_manager` readiness-registry dep without bumping — precedent for "dep-only additive" extensions. Story 2.3 added **`egress_policy_denied`** and Terraform egress controls **without** bumping `SCHEMA_VERSION` (env- and module-driven only). |
 
 ## Endpoints at a glance
 
@@ -38,7 +38,9 @@ v0.1 supervisor exposes — no opinions, no recommendations. For the
 |---|---|---|---|
 | `GET`  | `/`                           | Service identity, aggregate status, per-dependency readiness          | `200` |
 | `GET`  | `/health`                     | Liveness + readiness with ISO-8601 timestamp                          | `200` (ready) / `503` (degraded) |
-| `POST` | `/consensus`                  | Multi-agent debate loop (Story 3.2 — real, configurable threshold)    | `200` / `503` (if graph unavailable) |
+| `POST` | `/consensus`                  | Multi-agent debate loop (Story 3.2 — real, configurable threshold) + optional semantic cache (Story 4.1) | `200` / `503` (if graph unavailable) |
+| `POST` | `/semantic-cache/ingest`      | Ingest a verified fact with caller-provided embedding (Story 4.1, Qdrant) | `200` / `400` / `503` |
+| `POST` | `/semantic-cache/query`       | Similarity query within a `scope_id` (Story 4.1)                        | `200` / `400` / `503` |
 | `POST` | `/realms/spin`                | Enqueue a realm provisioning job (Story 2.1 — adapter-backed, async)  | `202` / `400` / `409` / `503` |
 | `GET`  | `/realms/{job_id}`            | Poll spin job state (Story 2.1 — `validating → provisioning → ready \| failed`) | `200` / `404` |
 | `DELETE` | `/realms/{job_id}`          | Request realm destroy (Story 2.2 — adapter-scoped; poll `GET` for completion) | `202` / `204` / `404` / `409` / `500` |
@@ -94,15 +96,16 @@ Pydantic model: `RootStatus`.
 {
   "service": "dirijor-supervisor",
   "version": "0.1.0",
-  "schema_version": 4,
+  "schema_version": 5,
   "status": "operational",
   "consensus_engine": "ready",
   "uptime_s": 12.4,
   "dependencies": {
     "graph_compiled":    { "ready": true,  "required": true,  "detail": null },
     "consensus_engine":  { "ready": true,  "required": true,  "detail": null },
-    "realtime_channel":  { "ready": true,  "required": false, "detail": null },
-    "semantic_cache":    { "ready": false, "required": false, "detail": "planned — see Story 4.1" },
+    "realtime_channel":  { "ready": true,  "required": true,  "detail": null },
+    "realm_manager":     { "ready": true,  "required": true,  "detail": null },
+    "semantic_cache":    { "ready": false, "required": false, "detail": "not configured" },
     "mesh":              { "ready": false, "required": false, "detail": "planned — see Story 5.1" }
   },
   "realtime": {
@@ -143,14 +146,15 @@ Pydantic model: `HealthStatus`.
 {
   "status": "ok",
   "version": "0.1.0",
-  "schema_version": 4,
+  "schema_version": 5,
   "uptime_s": 12.4,
   "timestamp": "2026-04-16T10:12:44.117Z",
   "checks": {
     "graph_compiled":    { "ready": true,  "required": true,  "detail": null },
     "consensus_engine":  { "ready": true,  "required": true,  "detail": null },
-    "realtime_channel":  { "ready": true,  "required": false, "detail": null },
-    "semantic_cache":    { "ready": false, "required": false, "detail": "planned — see Story 4.1" },
+    "realtime_channel":  { "ready": true,  "required": true,  "detail": null },
+    "realm_manager":     { "ready": true,  "required": true,  "detail": null },
+    "semantic_cache":    { "ready": false, "required": false, "detail": "not configured" },
     "mesh":              { "ready": false, "required": false, "detail": "planned — see Story 5.1" }
   }
 }
@@ -167,14 +171,14 @@ status code and `status` field differ.
 {
   "status": "degraded",
   "version": "0.1.0",
-  "schema_version": 4,
+  "schema_version": 5,
   "uptime_s": 342.0,
   "timestamp": "2026-04-16T10:18:02.554Z",
   "checks": {
     "graph_compiled":    { "ready": false, "required": true,  "detail": "compile failed: <reason>" },
     "consensus_engine":  { "ready": false, "required": true,  "detail": "compile failed: <reason>" },
     "realtime_channel":  { "ready": true,  "required": false, "detail": null },
-    "semantic_cache":    { "ready": false, "required": false, "detail": "planned — see Story 4.1" },
+    "semantic_cache":    { "ready": false, "required": false, "detail": "not configured" },
     "mesh":              { "ready": false, "required": false, "detail": "planned — see Story 5.1" }
   }
 }
@@ -210,13 +214,24 @@ callers — see AC 4 of Story 3.1.)
 
 ### Response — `200 OK`
 
-Exactly three top-level keys:
+SCHEMA **v2** superset on **200**: v0.1 keys (`messages`, `consensus_score`,
+`verified_facts`) plus debate-loop fields (`decision`, `votes`,
+`termination_reason`, `rounds`, `threshold`) and Story 4.1 semantic-cache
+outcome fields (`semantic_cache_status`, `semantic_cache_reason`). Example
+skeleton:
 
 ```json
 {
   "messages":         [ /* LangGraph state messages */ ],
   "consensus_score":  0.97,
-  "verified_facts":   [ /* list of cache-grounded facts (placeholder) */ ]
+  "verified_facts":   [ /* VerifiedFact objects when cache hits */ ],
+  "semantic_cache_status": "skipped",
+  "semantic_cache_reason": "query_vector_missing",
+  "decision": null,
+  "votes": [],
+  "termination_reason": "threshold_reached",
+  "rounds": 1,
+  "threshold": 0.95
 }
 ```
 
@@ -239,16 +254,62 @@ To diagnose *why*, poll `GET /health` and read
 `checks.graph_compiled.detail`. The 503 on `/consensus` is the signal;
 `/health` is the explanation.
 
+### Story 4.1 — optional semantic cache fields
+
+Optional JSON fields on `POST /consensus`:
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `query_vector` | `list[float] \| null` | `null` | Caller-provided embedding; when absent, `verified_facts` stays `[]` and a `semantic_cache.miss` log line is emitted (`query_vector_missing`). |
+| `semantic_scope_id` | `string` | `""` | **Required** (non-blank) whenever `query_vector` is present — realm / tenant isolation boundary; there is no default shared scope. |
+| `semantic_cache_limit` | `int` | `5` | `1`–`20` hits max. |
+| `semantic_cache_threshold` | `float \| null` | `null` | `0.0`–`1.0`; when `null`, the server uses `QDRANT_SCORE_THRESHOLD` (default `0.78`). |
+
+**HTTP 200 — semantic cache outcome (Story 4.1, additive on SCHEMA v2 body).**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `semantic_cache_status` | `"hit" \| "miss" \| "skipped" \| "unavailable" \| "disabled"` | Result of the **pre-consensus** cache lookup. |
+| `semantic_cache_reason` | `string \| null` | Closed-set detail when not a hit (e.g. `query_vector_missing`, `no_hits`, `below_threshold`, `qdrant_timeout`, `qdrant_connection`, `qdrant_auth`, `qdrant_unavailable`); `null` on `hit`. |
+
 ### Current limitations (v0.1, intentional)
 
-- `consensus_score` is a **placeholder constant** (`0.97`). Story 3.2
-  replaces this with the real debate-loop score.
-- `verified_facts` is populated only when the verified semantic cache
-  (Story 4.1) is online. Today it's `[]`.
+- `consensus_score` uses the **real** debate-loop score (Story 3.2); it is not a placeholder.
+- `verified_facts` is populated from the verified semantic cache when
+  `QDRANT_URL` is configured, vectors match `QDRANT_VECTOR_SIZE`, and
+  hits meet the effective score threshold; otherwise `[]`. **`semantic_cache_*`
+  fields** still report whether the lookup was skipped, missed, or failed.
+- Structured `semantic_cache.miss` logs remain (`reason` in a closed set — Story 4.1 AC 4).
 - No streaming on `/consensus` itself. Per-round state may be streamed
   over the `WS /ws/realm/{realm_id}` channel in a future story; the
   Story 3.3 channel only carries `topology.delta`, `metrics.update`, and
   `hitl.pending` today.
+
+---
+
+## `POST /semantic-cache/ingest`
+
+**Purpose.** Store one verified fact with a **caller-provided** dense vector
+(no embedding model in Core — Story 4.1). Payload fields persisted in
+Qdrant include `fact_id`, `scope_id`, `provenance_id`, `source_uri`,
+`verified_by`, `text`, `metadata`, `ingested_at`. The Qdrant **vector point id**
+is a deterministic UUID derived from `(scope_id, fact_id)` so two realms
+cannot overwrite each other’s points when reusing the same logical `fact_id`.
+
+**Configuration.** `QDRANT_URL` must be set; otherwise HTTP **503** with
+`{"error":"semantic_cache_unavailable","message":"..."}`. Optional:
+`QDRANT_API_KEY`, `QDRANT_COLLECTION` (default `dirijor_verified_facts`),
+`QDRANT_VECTOR_SIZE` (default `384`), `QDRANT_SCORE_THRESHOLD` (default
+`0.78`).
+
+## `POST /semantic-cache/query`
+
+**Purpose.** Nearest-neighbor retrieval within a single `scope_id`, sorted
+by score descending. Response `hits` are `VerifiedFact` objects
+(`fact_id`, `provenance_id`, `source_uri`, `snippet`, `score`,
+`metadata`). Validation failures return **400**; transport errors
+return **503** and emit `semantic_cache.miss` with `reason:
+qdrant_unavailable` where applicable.
 
 ---
 
@@ -427,7 +488,7 @@ Pydantic model: `SpinJob`.
     "agent_count":   3
   },
   "error":          null,
-  "schema_version": 4
+  "schema_version": 5
 }
 ```
 
@@ -631,7 +692,7 @@ Tests cover:
 - `test_health_ok_when_ready`, `test_health_503_when_required_dep_degraded`, `test_health_never_500s_when_probe_raises`, `test_health_includes_realtime_channel_dep`
 - `test_registry_contains_required_dependencies`
 - `test_consensus_smoke`, `test_consensus_degraded_keeps_v01_key_set`
-- `test_schema_version_pinned`, `test_schema_version_is_4` (fail loudly if someone bumps `SCHEMA_VERSION` without updating this page)
+- `test_schema_version_pinned`, `test_schema_version_is_5` (fail loudly if someone bumps `SCHEMA_VERSION` without updating this page)
 - Story 3.3 WebSocket suite: `test_ws_accepts_valid_realm_id`, `test_ws_rejects_missing_realm_id`, `test_ws_rejects_malformed_realm_id`, `test_ws_rejects_forbidden_realm`, `test_ws_broadcast_reaches_only_matching_realm`, `test_ws_heartbeat_emitted_on_idle`, `test_ws_disconnect_cleans_up_registry`, `test_ws_close_1011_on_send_failure`
 - Story 2.1 realm-spin suite: `test_spin_accepts_valid_request_returns_202`, `test_spin_echoes_caller_provided_realm_id`, `test_spin_generates_realm_id_when_absent`, `test_spin_rejects_empty_description`, `test_spin_rejects_oversized_description`, `test_spin_rejects_invalid_realm_id`, `test_spin_rejects_unknown_adapter`, `test_spin_rejects_conflict_on_active_realm`, `test_spin_job_progresses_through_lifecycle`, `test_spin_failure_surfaces_structured_error`, `test_get_realm_job_404_on_unknown_id`, `test_health_includes_realm_manager_dep`
 - Story 2.2 terraform + destroy suite (20 cases): `test_terraform_adapter_registered_when_token_and_binary_present`, `test_terraform_adapter_skipped_when_token_absent`, `test_terraform_adapter_skipped_when_binary_missing`, `test_spin_terraform_adapter_accepts_and_returns_202`, `test_spin_terraform_lifecycle_progresses_to_ready`, `test_spin_terraform_invokes_commands_in_order`, `test_spin_terraform_init_failure_surfaces_terraform_init_failed`, `test_spin_terraform_validate_failure_surfaces_terraform_validate_failed`, `test_spin_terraform_plan_failure_surfaces_terraform_plan_failed`, `test_spin_terraform_apply_failure_surfaces_terraform_apply_failed`, `test_spin_terraform_apply_failure_scrubs_do_pat_tokens`, `test_spin_terraform_command_timeout_surfaces_terraform_command_timeout`, `test_spin_terraform_credentials_missing_at_validate_time_surfaces_adapter_credentials_missing`, `test_destroy_on_ready_job_returns_202_and_runs_terraform_destroy`, `test_destroy_on_non_ready_job_returns_409_destroy_invalid_state`, `test_destroy_idempotent_on_already_destroyed_returns_204`, `test_delete_realm_job_404_on_unknown_id`, `test_schema_version_is_4`, `test_scrub_secrets_masks_all_documented_patterns`, `test_local_noop_destroy_is_idempotent_noop`
