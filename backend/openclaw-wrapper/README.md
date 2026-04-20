@@ -33,6 +33,25 @@ When policy runs, blocked tools and disallowed egress attempts return JSON inclu
 
 Those denials are also logged to **stderr** as one JSON line per event (`component: openclaw-wrapper-denial`) with the same `audit_id`. The `url` field in logs is written with **userinfo redacted** (credentials are stripped) so secrets are not echoed to stderr.
 
+## OpenTelemetry (Story 6.1)
+
+This service uses the **OpenTelemetry JS SDK** (`@opentelemetry/sdk-trace-node`)
+with an **OTLP HTTP** exporter when export is enabled. There is no separate
+“API-only” tracing mode: spans are created for `GET /health`, `POST /v1/tools/invoke`,
+and `POST /v1/egress/check`, but they are **no-op** until a `TracerProvider` with
+an exporter is registered — `main.js` calls `initOtel()` which registers OTLP
+export **only** when `OTEL_EXPORTER_OTLP_ENDPOINT` is non-empty and
+`OTEL_SDK_DISABLED` is not truthy.
+
+**Async context:** handlers run on Node’s HTTP `IncomingMessage` / `ServerResponse`
+tick; span lifecycle is bound to the request callback. Nested async work inside
+handlers continues on the same default executor — avoid `setImmediate` /
+untracked pools if you need strict parent/child linkage for future code.
+
+**Security:** span attributes include `dirijor.realm` and `http.route` only;
+never put secrets, full tool arguments, or preauth material in attributes (same
+posture as Story 5.2 logging).
+
 ## Environment variables
 
 | Variable | Description |
@@ -41,6 +60,10 @@ Those denials are also logged to **stderr** as one JSON line per event (`compone
 | `HEADSCALE_URL` | Shown in health JSON for mesh context (default `http://localhost:8080`) |
 | `PORT` | Listen port (default `3001`) |
 | `DIRIJOR_WRAPPER_BUILD_ID` | Optional string shown as `build` in `/health` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | If set, enables OTLP **HTTP** trace export (e.g. `http://localhost:4318/v1/traces` or collector base per exporter defaults). **Unset = no export.** |
+| `OTEL_SERVICE_NAME` | Defaults to **`dirijor-openclaw-wrapper`**. |
+| `OTEL_SERVICE_VERSION` | Optional build/version string for `service.version`. |
+| `OTEL_SDK_DISABLED` | `true` / `1` / `yes` (case-insensitive) disables OTLP registration (aligned with Core). |
 | `DIRIJOR_TOOL_ALLOWLIST` | Comma-separated tool names when **no** policy file is used. **Empty = deny all** tools on `/v1/tools/invoke`. |
 | `DIRIJOR_WRAPPER_POLICY_PATH` | Optional path to JSON policy file. If set, the file **must** exist and parse; otherwise the process **exits on startup** (fail fast). |
 | `DIRIJOR_EGRESS_MODE` | `deny_public` (default) or `allowlist` |
@@ -73,4 +96,6 @@ npm test
 npm start
 ```
 
-Tests use Node’s built-in `node:test` only (no extra npm dependencies).
+Tests use Node’s built-in `node:test`. Story 6.1 adds OpenTelemetry runtime
+dependencies for optional OTLP export; `test/otel.test.js` registers an
+in-memory `TracerProvider` to assert span names without a collector.

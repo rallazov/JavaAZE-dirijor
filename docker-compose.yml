@@ -4,6 +4,10 @@ services:
   dirijor-supervisor:
     build: ./backend/dirijor-core
     ports: ["8000:8000"]
+    # Optional Story 6.1 OTLP (HTTP) — point at a local collector when you run one:
+    # environment:
+    #   - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+    #   - OTEL_SERVICE_NAME=dirijor-core
     # Optional Story 4.1 semantic cache — point at local Qdrant when profile `qdrant` is enabled:
     # environment:
     #   - QDRANT_URL=http://qdrant:6333
@@ -12,6 +16,9 @@ services:
     environment:
       - HEADSCALE_URL=your-headscale-control-plane
       - REALM_NAME=finance-swarm-001
+      # Optional Story 6.1 — same collector as supervisor if desired:
+      # - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      # - OTEL_SERVICE_NAME=dirijor-openclaw-wrapper
       # Story 5.2 — application-layer tool allowlist + egress stub (empty/missing allowlist = deny all tools)
       # - DIRIJOR_TOOL_ALLOWLIST=noop,internal_lookup
       # - DIRIJOR_EGRESS_MODE=deny_public
