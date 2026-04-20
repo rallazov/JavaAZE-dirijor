@@ -77,6 +77,9 @@ collectors often listen on **4317** — use an HTTP-compatible collector URL for
 the Python HTTP exporter shipped here. Do not put API keys, prompts, or raw
 consensus bodies into span attributes (the implementation follows this rule).
 
+**Grafana (Story 6.2):** realm-health dashboard JSON and operator notes live under
+[`docs/observability/README.md`](docs/observability/README.md) (import path, Tempo/TraceQL assumptions, optional Compose profile).
+
 ### `GET /` sample response
 
 ```json

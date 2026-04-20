@@ -176,7 +176,12 @@ bolt-on, they rot.
   **`GET /health`** and **`GET /`** excluded from high-churn noise; WebSocket
   sessions use manual `dirijor.ws.*` spans. Span attributes intentionally omit
   secrets, raw prompts, and tool bodies — see repo README + wrapper README.
-- Grafana dashboards: Story 6.2.
+- Grafana dashboards: **Story 6.2** *(shipped)* — versioned JSON under
+  [`docs/observability/grafana/dirijor-realm-health.json`](../observability/grafana/dirijor-realm-health.json)
+  (UID `dirijor-realm-health`); assumes **Tempo** + TraceQL (see
+  [`docs/observability/README.md`](../observability/README.md)). Optional
+  `docker compose --profile observability` runs collector + Tempo + Grafana;
+  OTLP remains opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT`.
 - Canvas-integrated live safety metrics: Story 6.3.
 
 ---

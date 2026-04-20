@@ -39,5 +39,43 @@ services:
     volumes:
       - qdrant_storage:/qdrant/storage
 
+  # --- Optional local observability (Story 6.2): OTLP collector → Tempo → Grafana.
+  # Run: docker compose --profile observability up -d
+  # Point Core / wrapper at the collector (HTTP OTLP): OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+  otel-collector:
+    profiles: ["observability"]
+    image: otel/opentelemetry-collector:0.96.1
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./ops/observability/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "127.0.0.1:4318:4318"
+      - "127.0.0.1:4317:4317"
+    depends_on: [tempo]
+
+  tempo:
+    profiles: ["observability"]
+    image: grafana/tempo:2.3.1
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./ops/observability/tempo.yaml:/etc/tempo.yaml:ro
+    ports:
+      - "127.0.0.1:3200:3200"
+
+  grafana:
+    profiles: ["observability"]
+    image: grafana/grafana:10.4.5
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      # Override on shared machines: GRAFANA_ADMIN_USER / GRAFANA_ADMIN_PASSWORD
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_DEFAULT_THEME: dark
+    volumes:
+      - ./ops/observability/grafana-provisioning:/etc/grafana/provisioning:ro
+      - ./docs/observability/grafana:/var/lib/grafana/dashboards/dirijor:ro
+    depends_on: [tempo]
+
 volumes:
   qdrant_storage:
