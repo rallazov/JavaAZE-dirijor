@@ -19,6 +19,8 @@ const ringClass: Record<AgentNodeData['status'], string> = {
   degraded: 'border-realm-amber shadow-glow-amber',
   critical: 'border-realm-crimson shadow-glow-crimson animate-pulse',
   pending: 'border-realm-muted',
+  quarantined:
+    'border-violet-500 shadow-[0_0_18px_rgba(139,92,246,0.45)] ring-1 ring-violet-400/70',
 };
 
 /** Badge = qualitative AgentStatus; score ring = quantitative safetyScore (95+ / 80–94 / &lt;80). */

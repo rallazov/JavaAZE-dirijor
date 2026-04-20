@@ -30,7 +30,7 @@ v0.1 supervisor exposes — no opinions, no recommendations. For the
 | Field | Value | Meaning |
 |---|---|---|
 | `SERVICE_VERSION` | `"0.1.0"` | Module constant; `FastAPI(version=...)` and every response read this. |
-| `SCHEMA_VERSION` | `5` | Contract shape version. Story 4.1 bumped 4→5: `POST /semantic-cache/ingest`, `POST /semantic-cache/query`, optional consensus cache fields (`query_vector`, `semantic_scope_id`, `semantic_cache_limit`, `semantic_cache_threshold`), populated `verified_facts` on `/consensus` 200, live `semantic_cache` readiness probe. Story 2.2 bumped 3→4 (`DELETE /realms/{job_id}` + destroy-related `outputs` keys + nine new `SpinError.code` values). Story 3.2 bumped 1→2 (debate loop), Story 3.3 bumped 2→3 (WebSocket channel + `realtime` block). Story 2.1 added the `realm_manager` readiness-registry dep without bumping — precedent for "dep-only additive" extensions. Story 2.3 added **`egress_policy_denied`** and Terraform egress controls **without** bumping `SCHEMA_VERSION` (env- and module-driven only). |
+| `SCHEMA_VERSION` | `6` | Contract shape version. Story 4.2 bumped 5→6: optional `realm_id` / `anomaly_subject_agent_id` on `POST /consensus`; `GET /safety/quarantine/{realm_id}`; gated `POST /safety/signal`; optional `anomaly_policy` readiness entry; WebSocket payloads remain existing `topology.delta` / `hitl.pending` types (additive agent fields such as `status: "quarantined"`). Story 4.1 bumped 4→5: semantic-cache HTTP + consensus cache fields + `semantic_cache` probe. Story 2.2 bumped 3→4 (`DELETE /realms/{job_id}` + destroy-related `outputs` keys + nine new `SpinError.code` values). Story 3.2 bumped 1→2 (debate loop), Story 3.3 bumped 2→3 (WebSocket channel + `realtime` block). Story 2.1 added the `realm_manager` readiness-registry dep without bumping — precedent for "dep-only additive" extensions. Story 2.3 added **`egress_policy_denied`** and Terraform egress controls **without** bumping `SCHEMA_VERSION` (env- and module-driven only). |
 
 ## Endpoints at a glance
 
@@ -44,6 +44,8 @@ v0.1 supervisor exposes — no opinions, no recommendations. For the
 | `POST` | `/realms/spin`                | Enqueue a realm provisioning job (Story 2.1 — adapter-backed, async)  | `202` / `400` / `409` / `503` |
 | `GET`  | `/realms/{job_id}`            | Poll spin job state (Story 2.1 — `validating → provisioning → ready \| failed`) | `200` / `404` |
 | `DELETE` | `/realms/{job_id}`          | Request realm destroy (Story 2.2 — adapter-scoped; poll `GET` for completion) | `202` / `204` / `404` / `409` / `500` |
+| `GET`  | `/safety/quarantine/{realm_id}` | List quarantined agents for a realm (Story 4.2, shipped — in-process registry) | `200` / `400` (`SpinError`) |
+| `POST` | `/safety/signal`              | Inject synthetic anomaly signal for tests/demos (Story 4.2, shipped — **off** unless `DIRIJOR_SAFETY_SIGNALS_ENABLED` is truthy) | `204` / `400` / `403` |
 | `WS`   | `/ws/realm/{realm_id}`        | Live topology / metrics / HITL events for the Private Realm canvas    | accept `101` / close `4401`, `4403`, `1011` |
 
 The Docker image ships a stdlib `HEALTHCHECK` that calls `GET /health`
@@ -96,7 +98,7 @@ Pydantic model: `RootStatus`.
 {
   "service": "dirijor-supervisor",
   "version": "0.1.0",
-  "schema_version": 5,
+  "schema_version": 6,
   "status": "operational",
   "consensus_engine": "ready",
   "uptime_s": 12.4,
@@ -106,13 +108,13 @@ Pydantic model: `RootStatus`.
     "realtime_channel":  { "ready": true,  "required": true,  "detail": null },
     "realm_manager":     { "ready": true,  "required": true,  "detail": null },
     "semantic_cache":    { "ready": false, "required": false, "detail": "not configured" },
+    "anomaly_policy":    { "ready": true,  "required": false, "detail": null },
     "mesh":              { "ready": false, "required": false, "detail": "planned — see Story 5.1" }
   },
   "realtime": {
-    "transport": "websocket",
+    "connections": 0,
     "heartbeat_interval_s": 15.0,
-    "active_connections": 0,
-    "active_realms": 0
+    "schema_version": 6
   }
 }
 ```
@@ -128,7 +130,7 @@ Pydantic model: `RootStatus`.
 | `consensus_engine` | `"ready" \| "unavailable"` | v0.1 superset key — mirrors `graph_compiled.ready`. |
 | `uptime_s` | `float` | Seconds since module load (`time.monotonic()`). |
 | `dependencies` | `{ [name: string]: DependencyCheck }` | Same map shape as `/health.checks`. |
-| `realtime` | `RealtimeSummary` | Story 3.3 additive block. Shape: `{ transport: "websocket", heartbeat_interval_s: float, active_connections: int, active_realms: int }`. Counts reflect live WebSocket sessions; they are best-effort (not persisted across restarts). |
+| `realtime` | `RealtimeSummary` | Story 3.3 additive block. Canonical shape: `{ connections: int, heartbeat_interval_s: float, schema_version: int }` — see `RealtimeSummary` in `backend/dirijor-core/supervisor.py`. `connections` is the sum of open sessions across all realms (in-process only; best-effort across restarts). |
 
 ---
 
@@ -146,7 +148,7 @@ Pydantic model: `HealthStatus`.
 {
   "status": "ok",
   "version": "0.1.0",
-  "schema_version": 5,
+  "schema_version": 6,
   "uptime_s": 12.4,
   "timestamp": "2026-04-16T10:12:44.117Z",
   "checks": {
@@ -155,6 +157,7 @@ Pydantic model: `HealthStatus`.
     "realtime_channel":  { "ready": true,  "required": true,  "detail": null },
     "realm_manager":     { "ready": true,  "required": true,  "detail": null },
     "semantic_cache":    { "ready": false, "required": false, "detail": "not configured" },
+    "anomaly_policy":    { "ready": true,  "required": false, "detail": null },
     "mesh":              { "ready": false, "required": false, "detail": "planned — see Story 5.1" }
   }
 }
@@ -171,14 +174,16 @@ status code and `status` field differ.
 {
   "status": "degraded",
   "version": "0.1.0",
-  "schema_version": 5,
+  "schema_version": 6,
   "uptime_s": 342.0,
   "timestamp": "2026-04-16T10:18:02.554Z",
   "checks": {
     "graph_compiled":    { "ready": false, "required": true,  "detail": "compile failed: <reason>" },
     "consensus_engine":  { "ready": false, "required": true,  "detail": "compile failed: <reason>" },
-    "realtime_channel":  { "ready": true,  "required": false, "detail": null },
+    "realtime_channel":  { "ready": true,  "required": true,  "detail": null },
+    "realm_manager":     { "ready": true,  "required": true,  "detail": null },
     "semantic_cache":    { "ready": false, "required": false, "detail": "not configured" },
+    "anomaly_policy":    { "ready": true,  "required": false, "detail": null },
     "mesh":              { "ready": false, "required": false, "detail": "planned — see Story 5.1" }
   }
 }
@@ -198,9 +203,10 @@ status code and `status` field differ.
 
 ## `POST /consensus`
 
-**Purpose.** v0.1 placeholder consensus call. The real debate loop
-(configurable rounds, quorum, termination reasons) lands in
-**Story 3.2** — see [Concept — Consensus](../product/concepts/consensus.md)
+**Purpose.** Multi-agent debate loop (Story 3.2): configurable rounds,
+quorum threshold, per-round votes, and explicit `termination_reason`, with
+optional verified-fact augmentation when the semantic cache is configured
+(Story 4.1). See [Concept — Consensus](../product/concepts/consensus.md)
 and [ADR-0002](../architecture/adr/0002-consensus-threshold-95.md).
 
 ### Request
@@ -264,6 +270,8 @@ Optional JSON fields on `POST /consensus`:
 | `semantic_scope_id` | `string` | `""` | **Required** (non-blank) whenever `query_vector` is present — realm / tenant isolation boundary; there is no default shared scope. |
 | `semantic_cache_limit` | `int` | `5` | `1`–`20` hits max. |
 | `semantic_cache_threshold` | `float \| null` | `null` | `0.0`–`1.0`; when `null`, the server uses `QDRANT_SCORE_THRESHOLD` (default `0.78`). |
+| `realm_id` | `string \| null` | `null` | When set (same grammar as WebSocket `realm_id`), the supervisor evaluates the loaded anomaly policy after a successful 200 and may emit `topology.delta` / `hitl.pending` on quarantine (Story 4.2). |
+| `anomaly_subject_agent_id` | `string \| null` | `null` | Canvas agent node id to tag when a consensus rule fires; when omitted, the first opinion’s `agent_id` is used, or `"consensus"` when there are no opinions. |
 
 **HTTP 200 — semantic cache outcome (Story 4.1, additive on SCHEMA v2 body).**
 
@@ -310,6 +318,53 @@ by score descending. Response `hits` are `VerifiedFact` objects
 `metadata`). Validation failures return **400**; transport errors
 return **503** and emit `semantic_cache.miss` with `reason:
 qdrant_unavailable` where applicable.
+
+---
+
+## Story 4.2 — anomaly policy & quarantine *(shipped)*
+
+**Configuration.**
+
+- `DIRIJOR_ANOMALY_POLICY_PATH` — optional path to a **JSON** policy document
+  (`AnomalyPolicyDocument`: `{ "rules": [ ... ] }`). Empty / unset → in-process
+  **empty ruleset** (local dev needs no file). When the path is set but the
+  file is missing, invalid JSON, or fails Pydantic validation, the
+  `anomaly_policy` readiness probe reports `ready: false` with a short
+  `detail` string; **required remains false** so the rest of the supervisor
+  stays operational.
+- `DIRIJOR_SAFETY_SIGNALS_ENABLED` — when truthy (`1`, `true`, `yes`),
+  enables `POST /safety/signal`. Default is **off** so hardened deployments
+  do not expose synthetic inject by mistake.
+
+**Rule matchers (v0).** Each rule has `id`, optional `description`, `action:
+"quarantine"`, and `when` (discriminated by `type`):
+
+- `consensus_score_below` — `{ "type": "consensus_score_below", "threshold": <float> }`
+- `consensus_termination_in` — `{ "type": "consensus_termination_in", "reasons": ["...", ...] }`
+- `signal_type_eq` — `{ "type": "signal_type_eq", "signal_type": "..." }` (for `/safety/signal`)
+- `tool_name_regex` — `{ "type": "tool_name_regex", "pattern": "..." }` (Python `re.search`; evaluated against `tool_name` from the signal)
+
+**`GET /safety/quarantine/{realm_id}`** — `200` body
+`{ "items": [ { "realm_id", "agent_id", "rule_id", "quarantined_at", "evidence" } ... ], "schema_version": <int> }`.
+Malformed `realm_id` → **400** with `SpinError` (`invalid_realm_id`), same grammar as the WebSocket realm id.
+
+**`POST /safety/signal`** — JSON body
+`{ "realm_id", "agent_id", "signal_type", "tool_name"?: string, "evidence"?: object }`.
+**204** on success when enabled; **403** when signals are disabled.
+
+**WebSocket (additive).** Quarantine uses existing event types only:
+when policy isolates an agent, `topology.delta` carries `agents[]` entries with `status: "quarantined"`
+plus `label` / `signaturePreview` / `safetyScore` hints; `hitl.pending` carries
+a `CriticalAction`-compatible `action` object (stable `id`, `title`, `detail`,
+`requestedAt`, `safetyScore`).
+
+**Dedup.** Repeated triggers for the same `(realm_id, agent_id, rule_id)` within
+~30s merge evidence in the registry but **skip** additional WS fan-out
+(idempotent operator UX).
+
+**Registry caveat.** Quarantine state is in-memory per process (same as
+`_SPIN_JOBS`); multi-worker deployments see partitioned state until a shared
+store lands.
 
 ---
 
@@ -488,7 +543,7 @@ Pydantic model: `SpinJob`.
     "agent_count":   3
   },
   "error":          null,
-  "schema_version": 5
+  "schema_version": 6
 }
 ```
 
@@ -587,7 +642,7 @@ share frames** (broadcast is strictly scoped to `realm_id`).
 | Close code | Reason                        | Retry? | When it fires |
 |---|---|---|---|
 | `4401`     | `invalid_realm_id`            | no     | `realm_id` fails the regex. |
-| `4403`     | `realm_forbidden`             | no     | `_authorize_realm(realm_id)` returns false. v0.1 allow-all stub — real auth lands with the Supabase cutover. |
+| `4403`     | `realm_forbidden`             | no     | `_authorize_realm(realm_id)` returns false. v0.1 allow-all stub — real auth lands with Story 5.1 (mesh / scoped token). |
 | `1011`     | `heartbeat_send_failed`       | yes    | Server could not emit a heartbeat (transport unhealthy). Session is evicted from the registry. |
 | `1000`     | clean close                   | yes    | Client closed intentionally; reconnect if the canvas is still mounted. |
 
@@ -597,39 +652,43 @@ session.
 
 ### Envelope
 
-Every frame (both directions, though today the server is authoritative
-and inbound frames are discarded) uses the same envelope. The model has
-`ConfigDict(extra="forbid")` — unknown keys are a hard error, so
-additive evolution must go through `SCHEMA_VERSION`.
+Every **server → client** frame uses the same six top-level keys (see
+`RealtimeEnvelope` in `supervisor.py`). The Pydantic model uses
+`ConfigDict(extra="forbid")` — a seventh top-level key is a contract
+violation. Payload evolution is **per `type`** inside `payload` and is
+governed by `SCHEMA_VERSION` + docs on this page.
+
+Inbound client frames are read as text and discarded in v0.1 (canvas →
+Core remains HTTP POST).
 
 ```json
 {
-  "v": 1,
   "type": "topology.delta",
-  "ts": "2026-04-16T10:12:44.117Z",
+  "schema_version": 6,
   "realm_id": "demo",
-  "connection_id": "b7b7…",
-  "payload": { /* type-specific */ }
+  "ts": "2026-04-16T10:12:44.117Z",
+  "seq": 3,
+  "payload": { }
 }
 ```
 
 | Field | Type | Notes |
 |---|---|---|
-| `v` | `int` (`1`) | Envelope version. Independent of `SCHEMA_VERSION`; only bumps if the envelope itself changes shape. |
-| `type` | enum | `session.hello`, `topology.delta`, `metrics.update`, `hitl.pending`, `heartbeat`, `session.bye`. |
+| `type` | `string` | One of `session.hello`, `topology.delta`, `metrics.update`, `hitl.pending`, `heartbeat`, `session.bye`. |
+| `schema_version` | `int` | Must equal HTTP `SCHEMA_VERSION` at send time. |
+| `realm_id` | `string` | Echo of the path-param realm. |
 | `ts` | ISO-8601 UTC (`Z` suffix) | Server clock. |
-| `realm_id` | `string` | Always echoed so the client can multiplex safely. |
-| `connection_id` | `string` (UUID) | Stable for the lifetime of the TCP session. |
+| `seq` | `int` | Monotonic per WebSocket session, starting at `0` on `session.hello`. Increments only after a successful `send_json`. |
 | `payload` | `object` | Type-specific body. See below. |
 
 ### Event types
 
-- `session.hello` — first frame. `payload.server_version` = `SERVICE_VERSION`, `payload.schema_version` = `SCHEMA_VERSION`, `payload.heartbeat_interval_s`.
+- `session.hello` — first frame (`seq == 0`). Payload includes `service_version`, `schema_version`, `supported_event_types`, `heartbeat_interval_s`, and `connection_id` (UUID for this TCP session).
 - `heartbeat` — emitted every `HEARTBEAT_INTERVAL_S` (default **15 s**). Empty payload.
-- `topology.delta` — `payload.agents?: AgentPatch[]`, `payload.edges?: EdgePatch[]`. Each patch carries an `id`; `_tombstone: true` means "remove this id". All other keys are a shallow upsert.
+- `topology.delta` — `payload.agents?: AgentPatch[]`, `payload.edges?: EdgePatch[]`. Each patch carries an `id`; `_tombstone: true` means "remove this id". All other keys are a shallow upsert. Story 4.2 sets agent `status` to `"quarantined"` (and related hints) when policy isolates an agent.
 - `metrics.update` — `payload` is a partial of the canvas `RealmMetrics` shape. Shallow-merged into the store.
 - `hitl.pending` — `payload.action` is a full `CriticalAction`; dedup by `action.id`.
-- `session.bye` — reserved for graceful shutdown. Not emitted today.
+- `session.bye` — reserved for a future **server-initiated** graceful shutdown (operator drain, deploy, etc.). v0.1 does not emit it; sessions end with client close or server `1011` / process teardown.
 
 ### Reconnect policy (client-side contract)
 
@@ -641,12 +700,13 @@ The canvas client (`frontend/lib/dirijor-realtime.ts`) implements:
 
 ### Readiness & operator visibility
 
-- `dependencies.realtime_channel` / `checks.realtime_channel` — the
-  probe is `"always ready"` today (the WS registry is in-process and
-  cheap). It's `required: false` so the supervisor doesn't go
-  `degraded` just because no canvas client is connected.
-- `GET /` → `realtime.active_connections` / `realtime.active_realms`
-  are best-effort counters against `_CONNECTIONS: dict[str, set[_WsSession]]`.
+- `dependencies.realtime_channel` / `checks.realtime_channel` — required
+  (`required: true`); probe reflects that the WebSocket route is
+  registered (v0.1 does not fail readiness when zero clients are
+  connected).
+- `GET /` → `realtime.connections` counts open sessions via
+  `_CONNECTIONS: dict[str, set[_WsSession]]` (in-process; not replicated
+  across workers).
 
 ### Worked example — open a connection with `websocat`
 
@@ -692,7 +752,8 @@ Tests cover:
 - `test_health_ok_when_ready`, `test_health_503_when_required_dep_degraded`, `test_health_never_500s_when_probe_raises`, `test_health_includes_realtime_channel_dep`
 - `test_registry_contains_required_dependencies`
 - `test_consensus_smoke`, `test_consensus_degraded_keeps_v01_key_set`
-- `test_schema_version_pinned`, `test_schema_version_is_5` (fail loudly if someone bumps `SCHEMA_VERSION` without updating this page)
+- `test_schema_version_pinned`, `test_schema_version_is_6` (fail loudly if someone bumps `SCHEMA_VERSION` without updating this page)
+- Story 4.2 safety suite: `test_safety_quarantine.py` (policy load, consensus + signal hooks, HTTP list, realm isolation, `broadcast_event` unknown-type regression)
 - Story 3.3 WebSocket suite: `test_ws_accepts_valid_realm_id`, `test_ws_rejects_missing_realm_id`, `test_ws_rejects_malformed_realm_id`, `test_ws_rejects_forbidden_realm`, `test_ws_broadcast_reaches_only_matching_realm`, `test_ws_heartbeat_emitted_on_idle`, `test_ws_disconnect_cleans_up_registry`, `test_ws_close_1011_on_send_failure`
 - Story 2.1 realm-spin suite: `test_spin_accepts_valid_request_returns_202`, `test_spin_echoes_caller_provided_realm_id`, `test_spin_generates_realm_id_when_absent`, `test_spin_rejects_empty_description`, `test_spin_rejects_oversized_description`, `test_spin_rejects_invalid_realm_id`, `test_spin_rejects_unknown_adapter`, `test_spin_rejects_conflict_on_active_realm`, `test_spin_job_progresses_through_lifecycle`, `test_spin_failure_surfaces_structured_error`, `test_get_realm_job_404_on_unknown_id`, `test_health_includes_realm_manager_dep`
 - Story 2.2 terraform + destroy suite (20 cases): `test_terraform_adapter_registered_when_token_and_binary_present`, `test_terraform_adapter_skipped_when_token_absent`, `test_terraform_adapter_skipped_when_binary_missing`, `test_spin_terraform_adapter_accepts_and_returns_202`, `test_spin_terraform_lifecycle_progresses_to_ready`, `test_spin_terraform_invokes_commands_in_order`, `test_spin_terraform_init_failure_surfaces_terraform_init_failed`, `test_spin_terraform_validate_failure_surfaces_terraform_validate_failed`, `test_spin_terraform_plan_failure_surfaces_terraform_plan_failed`, `test_spin_terraform_apply_failure_surfaces_terraform_apply_failed`, `test_spin_terraform_apply_failure_scrubs_do_pat_tokens`, `test_spin_terraform_command_timeout_surfaces_terraform_command_timeout`, `test_spin_terraform_credentials_missing_at_validate_time_surfaces_adapter_credentials_missing`, `test_destroy_on_ready_job_returns_202_and_runs_terraform_destroy`, `test_destroy_on_non_ready_job_returns_409_destroy_invalid_state`, `test_destroy_idempotent_on_already_destroyed_returns_204`, `test_delete_realm_job_404_on_unknown_id`, `test_schema_version_is_4`, `test_scrub_secrets_masks_all_documented_patterns`, `test_local_noop_destroy_is_idempotent_noop`

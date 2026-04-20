@@ -9,12 +9,22 @@ const statusCopy: Record<AgentStatus, string> = {
   degraded: 'Elevated — review traffic',
   critical: 'Containment suggested',
   pending: 'Awaiting verification',
+  quarantined: 'Isolated — policy quarantine',
 };
 
 export function SafetyBadge({ status, className }: { status: AgentStatus; className?: string }) {
   const Icon =
-    status === 'healthy' ? ShieldCheck : status === 'degraded' || status === 'pending' ? ShieldAlert : ShieldOff;
-  const variant = status === 'healthy' ? 'safe' : status === 'critical' ? 'critical' : 'warn';
+    status === 'healthy'
+      ? ShieldCheck
+      : status === 'degraded' || status === 'pending'
+        ? ShieldAlert
+        : ShieldOff;
+  const variant =
+    status === 'healthy'
+      ? 'safe'
+      : status === 'critical' || status === 'quarantined'
+        ? 'critical'
+        : 'warn';
   return (
     <Badge variant={variant} className={cn('gap-1 font-mono', className)} title={statusCopy[status]}>
       <Icon className="size-3" aria-hidden />

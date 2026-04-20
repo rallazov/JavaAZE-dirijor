@@ -8,7 +8,7 @@ Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
 - **Date:** 2026-04-16
 - **Deciders:** Ramin Allazov (JavaAZE)
 - **Related PRD clause:** *"LangGraph-based Dirijor Core supervisor with multi-agent consensus (≥95% agreement) + Verified Semantic Cache."* — [DIRIJOR-PRD.md](../../DIRIJOR-PRD.md)
-- **Related stories:** Story 3.2 (consensus path beyond placeholder), Story 4.1 (verified semantic cache).
+- **Related stories:** Story 3.2 (consensus debate loop), Story 4.1 (verified semantic cache), Story 4.2 (anomaly policy / auto-quarantine — shipped).
 
 ## Context
 
@@ -96,9 +96,9 @@ Operational specifics:
   semantic cache.
 - **Cost.** N× inference tokens. Same mitigations as latency.
 - **Tuning surface.** The threshold is *per action class* — which is
-  powerful but requires disciplined policy authorship. This lives in
-  Story 4.2 (policy object model) and the Safety Fortress, not in ad
-  hoc config.
+  powerful but requires disciplined policy authorship. The v0 JSON anomaly
+  policy + rule matchers ship in Story 4.2; richer per-action-class tuning
+  continues across the Safety Fortress, not in ad hoc config.
 - **Correlated hallucination is still possible.** Agents using the same
   model and prompt will correlate. We break correlation with (a)
   heterogeneous agent configurations in the debate, and (b) the
@@ -135,3 +135,4 @@ Operational specifics:
 - ADR-0001 (why LangGraph hosts the debate loop): [0001-langgraph-supervisor.md](0001-langgraph-supervisor.md)
 - Story 3.2 (consensus beyond placeholder): `_bmad-output/planning-artifacts/epics.md` (in the repo)
 - Story 4.1 (verified semantic cache — Qdrant): same planning artifact.
+- Story 4.2 (anomaly policy & quarantine): same planning artifact.

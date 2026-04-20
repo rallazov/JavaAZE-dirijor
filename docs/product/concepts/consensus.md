@@ -101,24 +101,24 @@ will correlate their mistakes. The semantic cache breaks that
 correlation by grounding claims in an external, provenance-tagged
 source of truth.
 
-Story 4.1 delivers the Qdrant-backed cache; until then, the consensus
-path runs but cache lookups are stubbed. The supervisor's
-[`/health`](../../reference/supervisor-api.md) endpoint already
-reports `semantic_cache` as `required: false, ready: false,
-detail: "planned — see Story 4.1"` — this is a public, known limitation
-of v0.1.
+Story 4.1 ships the Qdrant-backed ingest/query surfaces and optional
+consensus augmentation. When `QDRANT_URL` is unset, [`/health`](../../reference/supervisor-api.md)
+reports `semantic_cache` as `required: false` with
+`detail: "not configured"` — consensus still runs; `verified_facts` stay
+empty until the cache is wired up.
 
 ## Current implementation status (v0.1)
 
-- The LangGraph supervisor **structure** is in place (`backend/dirijor-core/supervisor.py`).
-- `consensus_node` is a **placeholder** that returns `consensus_score = 0.97` — flagged in [`docs/project-context.md`](../../project-context.md) and in the supervisor module docstring.
-- The real debate loop (configurable rounds, quorum, termination reasons) is **Story 3.2** — next up after supervisor hardening (see `_bmad-output/planning-artifacts/epics.md` in the repo).
-- The verified semantic cache is **Story 4.1** (same planning artifact).
+- The LangGraph supervisor **graph** is in place (`backend/dirijor-core/supervisor.py`) with a **real debate loop** (Story 3.2): configurable `max_rounds` / `threshold`, per-round votes, `termination_reason`, and a safe no-decision path when quorum is not met.
+- **Verified semantic cache** (Story 4.1) augments `POST /consensus` when `query_vector` + scope are supplied and Qdrant is configured; when the cache is off or misses, `verified_facts` stays empty and misses are logged — see the [supervisor API reference](../../reference/supervisor-api.md).
 
-Until both land, any claim that Dirijor delivers "zero hallucination on
-high-stakes outputs" is **aspirational**. The docs, the PRD, and the
-supervisor's `/health` contract all say so explicitly — that honesty is
-the point of the [supervisor API reference](../../reference/supervisor-api.md).
+Claims that Dirijor delivers **"zero hallucination on high-stakes outputs"**
+remain **aspirational** until Safety Fortress closes the remaining loop beyond
+consensus + cache: **immutable audit export** (Story 4.3), broader
+production-grade policy, and runtime hardening. **Anomaly auto-quarantine**
+(JSON policy + supervisor hooks — Story 4.2) is shipped; it does not by itself
+prove the full PRD safety bar. The PRD and `/health` contract stay explicit
+about what is shipped vs planned — that honesty is the point of the API reference.
 
 ## Related reading
 

@@ -176,12 +176,13 @@ def test_health_never_500s_when_probe_raises(monkeypatch):
 
 def test_registry_contains_required_dependencies():
     names = {dep.name: dep for dep in supervisor.REGISTRY}
-    assert {"graph_compiled", "consensus_engine", "semantic_cache", "mesh"} <= set(
+    assert {"graph_compiled", "consensus_engine", "semantic_cache", "anomaly_policy", "mesh"} <= set(
         names
     )
     assert names["graph_compiled"].required is True
     assert names["consensus_engine"].required is True
     assert names["semantic_cache"].required is False
+    assert names["anomaly_policy"].required is False
     assert names["mesh"].required is False
 
     checks = supervisor.resolve_readiness()
@@ -240,15 +241,15 @@ def test_schema_version_pinned():
     """Loud regression guard — bumping SCHEMA_VERSION requires deliberately
     updating this test AND README sample payloads (Story 3.1 AC 5,
     Story 3.2 AC 5, Story 3.3 AC 7, Story 2.2 AC 10)."""
-    assert supervisor.SCHEMA_VERSION == 5
+    assert supervisor.SCHEMA_VERSION == 6
     assert supervisor.SERVICE_VERSION == "0.1.0"
 
 
-def test_schema_version_is_5():
-    """Explicit belt-and-braces pin — Story 4.1 bumped 4 → 5. If a future
+def test_schema_version_is_6():
+    """Explicit belt-and-braces pin — Story 4.2 bumped 5 → 6. If a future
     story bumps SCHEMA_VERSION again, BOTH this test and
     `test_schema_version_pinned` must be updated together."""
-    assert supervisor.SCHEMA_VERSION == 5
+    assert supervisor.SCHEMA_VERSION == 6
 
 
 # --- Story 3.2 AC 1–4, AC 7 (new debate-loop coverage) ----------------------

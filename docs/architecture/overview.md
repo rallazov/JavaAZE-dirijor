@@ -47,8 +47,9 @@ The PRD encodes this as a non-negotiable:
 **Bindings today (v0.1).**
 
 - Canvas shell, inspector, HITL UX: shipped through Epic 1 (Stories 1.1–1.6).
-- Live WebSocket binding to Core: **not yet** (lands in Story 3.3 —
-  the canvas currently calls `useDirijorRealtime({ url: undefined })`).
+- Live WebSocket binding to Core: **shipped** (Story 3.3 — `GET /ws/realm/{realm_id}`,
+  six-key envelope, realm id validated before upgrade; v0.1 `_authorize_realm` stub until Story 5.1).
+  Canvas uses `NEXT_PUBLIC_DIRIJOR_WS_URL` + `useDirijorRealtime`; unset env keeps demo `idle`.
 
 ---
 
@@ -69,11 +70,12 @@ hooks" better than a linear chain or ad-hoc async code. See
 [ADR-0001 — LangGraph supervisor](adr/0001-langgraph-supervisor.md) for
 the full reasoning and alternatives considered.
 
-**Why a stable HTTP contract first?** Because the canvas (Story 3.3) and
-observability (Story 6.1) will both bind to it. If the contract drifts,
-two subsystems break. Story 3.1 hardened `/`, `/health`, and
-`/consensus` into a Pydantic-backed, schema-versioned contract with a
-readiness registry — that's the surface every other subsystem speaks to.
+**Why a stable HTTP contract first?** Because the canvas (Story 3.3
+WebSocket + HTTP) and observability (Story 6.1) both bind to the same
+supervisor contract family. If it drifts, multiple subsystems break.
+Story 3.1 hardened `/`, `/health`, and `/consensus` into a Pydantic-backed,
+schema-versioned surface with a readiness registry — that's what every
+other subsystem speaks to.
 See the [Supervisor API reference](../reference/supervisor-api.md).
 
 **Why 95% consensus?** See
@@ -83,12 +85,17 @@ and [Concept — Consensus](../product/concepts/consensus.md).
 **Bindings today (v0.1).**
 
 - `/`, `/health`, `/consensus` hardened contract: shipped (Story 3.1).
+- `WS /ws/realm/{realm_id}` live channel: shipped (Story 3.3).
 - Consensus debate loop: shipped (Story 3.2 — real quorum + rounds).
 - Verified semantic cache (Qdrant): **Story 4.1** — `POST /semantic-cache/*`,
   optional consensus augmentation via `query_vector` / `semantic_scope_id`,
   live `semantic_cache` readiness probe (`required: false`; unconfigured URL
   → `ready: false, detail: "not configured"`).
-- Anomaly auto-quarantine, audit export: Stories 4.2 / 4.3.
+- Anomaly auto-quarantine: **shipped** (**Story 4.2**) — versioned JSON policy
+  (`DIRIJOR_ANOMALY_POLICY_PATH`), post-consensus + optional gated `POST /safety/signal`
+  evaluation, in-process per-realm registry, `GET /safety/quarantine/{realm_id}`,
+  canvas notifications via existing `topology.delta` / `hitl.pending` types.
+- Audit export package: **Story 4.3** (backlog).
 
 ---
 

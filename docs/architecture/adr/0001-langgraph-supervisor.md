@@ -8,7 +8,7 @@ Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
 - **Date:** 2026-04-16
 - **Deciders:** Ramin Allazov (JavaAZE)
 - **Related PRD clause:** *"LangGraph-based Dirijor Core supervisor with multi-agent consensus (≥95% agreement) + Verified Semantic Cache."* — [DIRIJOR-PRD.md](../../DIRIJOR-PRD.md)
-- **Related stories:** Story 3.1 (supervisor hardening, done), 3.2 (consensus beyond placeholder), 3.3 (canvas ↔ core real-time).
+- **Related stories:** Story 3.1 (supervisor hardening, done), 3.2 (consensus debate loop, done), 3.3 (canvas ↔ Core WebSocket, done), 4.2 (anomaly policy / quarantine hooks, done).
 
 ## Context
 

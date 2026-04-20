@@ -89,7 +89,7 @@ Dirijor is a three-layer system, all private to you:
    microVM-sandboxed infrastructure on the cloud you chose.
 
 Around those three layers sit the **Safety Fortress** (debate loops,
-auto-quarantine, audit export) and **Observability** (OpenTelemetry →
+auto-quarantine — Story 4.2 shipped, audit export — Story 4.3) and **Observability** (OpenTelemetry →
 Grafana → back into the canvas). The
 [architecture overview](../architecture/overview.md) walks the diagram end-to-end.
 

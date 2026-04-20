@@ -4,9 +4,9 @@ Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
 
 # Tutorial — Your first local Dirijor environment
 
-> **Last verified:** 2026-04-16, against the supervisor contract hardened
-> in Story 3.1 (v0.1.0, schema_version 1). If this page is stale, treat
-> it as untrusted until a maintainer re-runs it.
+> **Last verified:** 2026-04-19, against `docs/reference/supervisor-api.md`
+> (`schema_version` **6** on `GET /` after Story 4.2). Re-run the curl +
+> pytest steps after any `SCHEMA_VERSION` bump.
 
 **Time:** 10–15 minutes.
 **Prerequisites:** Docker Desktop (or Docker Engine + Compose v2),
@@ -17,11 +17,11 @@ Node 18+, Python 3.12+, and git.
 ## Why this tutorial matters
 
 Dirijor's end-state is a one-click private realm on the cloud of your
-choice. **v0.1 is not there yet** — the mesh and cache subsystems are
-still being built (Stories 4.1 and 5.1). What *is* there is the full
-control plane locally: the **supervisor** with its hardened HTTP
-contract, and the **Network Canvas** UI. Running both together is the
-fastest way to:
+choice. **v0.1 is not there yet** — mesh bootstrap and full Safety
+Fortress automation are still growing (Stories 4.3, 5.1+). What *is*
+there locally is the **supervisor** (HTTP + WebSocket + consensus +
+optional semantic cache + realm spin/destroy), and the **Network Canvas**
+UI. Running both together is the fastest way to:
 
 - Understand the pieces that will later compose a real realm.
 - Verify your environment can build and run Dirijor before you touch infra.
@@ -30,8 +30,10 @@ fastest way to:
 
 ## What you'll have at the end
 
-- The supervisor running on `http://localhost:8000`, serving
-  `GET /`, `GET /health`, and `POST /consensus`.
+- The supervisor running on `http://localhost:8000`, serving the
+  contract in [Supervisor API reference](../../reference/supervisor-api.md)
+  (including `POST /consensus`, realm spin/destroy, optional semantic-cache
+  and safety/quarantine endpoints, and `WS /ws/realm/{realm_id}`).
 - The canvas UI running on `http://localhost:3000`, redirecting to
   `/canvas`.
 - A terminal window where you can `curl` the supervisor and watch the
@@ -93,25 +95,33 @@ You should see a response whose shape matches this (values will differ):
 {
   "service": "dirijor-supervisor",
   "version": "0.1.0",
-  "schema_version": 1,
+  "schema_version": 6,
   "status": "operational",
   "consensus_engine": "ready",
   "uptime_s": 4.8,
   "dependencies": {
     "graph_compiled":    { "ready": true,  "required": true,  "detail": null },
     "consensus_engine":  { "ready": true,  "required": true,  "detail": null },
-    "semantic_cache":    { "ready": false, "required": false, "detail": "planned — see Story 4.1" },
+    "realtime_channel":  { "ready": true,  "required": true,  "detail": null },
+    "realm_manager":     { "ready": true,  "required": true,  "detail": null },
+    "semantic_cache":    { "ready": false, "required": false, "detail": "not configured" },
+    "anomaly_policy":    { "ready": true,  "required": false, "detail": null },
     "mesh":              { "ready": false, "required": false, "detail": "planned — see Story 5.1" }
+  },
+  "realtime": {
+    "connections": 0,
+    "heartbeat_interval_s": 15.0,
+    "schema_version": 6
   }
 }
 ```
 
 !!! tip "What to notice"
-    `semantic_cache` and `mesh` are explicitly **not required** and
-    explicitly **not ready** — because they're planned work. This is
-    intentional honesty from the supervisor's readiness contract. When
-    they become real, these flags flip and the contract doesn't change
-    shape. See [Supervisor API reference](../../reference/supervisor-api.md).
+    Optional subsystems (`semantic_cache`, `anomaly_policy`, `mesh`) stay `required: false`
+    so local dev works without Qdrant, a policy file, or mesh. `semantic_cache.detail`
+    reads **`not configured`** until `QDRANT_URL` (and friends) are set —
+    see the API reference. `realtime.connections` counts open WebSocket
+    sessions (in-process; zero with no canvas clients).
 
 **What this unlocks:** every subsequent integration you build against
 the supervisor can distinguish *ready* from *planned* without parsing
@@ -160,9 +170,10 @@ pip install -r backend/dirijor-core/requirements-dev.txt
 python -m pytest backend/dirijor-core/tests
 ```
 
-**Verify:** you should see `10 passed` in under a second.
-(Story 3.1 shipped 10 cases covering AC 1–7 including the post-review
-regression guard.)
+**Verify:** you should see **all tests passed** (e.g. **102 passed** in
+~2s on a typical laptop — count grows as stories land). The suite covers
+HTTP, WebSocket, consensus, realm spin/destroy, terraform adapter seams,
+egress policy, semantic-cache fakes, and schema pins.
 
 **What this unlocks:** when you contribute code, you'll use this same
 suite to prove you didn't break the contract. The tests are
@@ -173,10 +184,12 @@ identically in CI.
 
 ## Step 5 — Start the Network Canvas
 
-**Why.** The canvas is the operator's primary workspace. In v0.1 it
-runs standalone (the Core ↔ Canvas WebSocket channel lands in Story
-3.3), but you can already see the command-center UI, inspector, and
-HITL gate UX that every future realm will use.
+**Why.** The canvas is the operator's primary workspace. It runs with a
+bundled demo graph even when Core is down. **Story 3.3** added the real
+WebSocket channel (`GET /ws/realm/{realm_id}`): set
+`NEXT_PUBLIC_DIRIJOR_WS_URL` (see `frontend/.env.example`) to connect
+while the supervisor from Step 2 is running; if the env var is unset or
+empty, the client stays **`idle`** and the demo still works.
 
 In a new terminal:
 
@@ -190,7 +203,15 @@ Open `http://localhost:3000` — you'll be redirected to `/canvas`.
 
 **Verify:** the canvas loads with a dark command-center theme, a
 toolbar, inspector region, and status region. You can pan, zoom, and
-drag nodes (positions persist for the session).
+drag nodes (positions persist for the session). With WS configured and
+Core up, the status region should show **Live** (or **Reconnecting…**
+during blips — see [Supervisor API reference](../../reference/supervisor-api.md)
+§ WebSocket).
+
+**Optional — prove the wire:** with both processes running and
+`NEXT_PUBLIC_DIRIJOR_WS_URL=ws://127.0.0.1:8000/ws/realm`, open DevTools
+→ Console on `/canvas` or run `websocat ws://127.0.0.1:8000/ws/realm/local`
+and confirm the first frame is `session.hello` (`seq == 0`).
 
 **What this unlocks:** the UI concepts from
 [Realms](../../product/concepts/realms.md) and
@@ -246,10 +267,11 @@ operate / tear down — over real IaC adapters.
 ??? failure "The canvas UI shows a blank screen or 500"
 
     Check `frontend/` for a previous build: `rm -rf frontend/.next` and
-    re-run `npm install && npm run dev`. The canvas is still
-    pre-wiring to Core (`useDirijorRealtime({ url: undefined })` per
-    Story 1.4 notes), so a supervisor that isn't running will **not**
-    break the canvas — they're independent processes in v0.1.
+    re-run `npm install && npm run dev`. When `NEXT_PUBLIC_DIRIJOR_WS_URL`
+    is unset, `resolveDirijorWsUrl` leaves the realtime client **idle**,
+    so a supervisor that isn't running will **not** break the canvas.
+    If the env var points at a dead host, expect **Reconnecting…** /
+    **Disconnected** in the status region, not a blank page.
 
 ---
 
@@ -258,4 +280,4 @@ operate / tear down — over real IaC adapters.
 - **Understand the contract you just exercised:** [Supervisor API reference](../../reference/supervisor-api.md).
 - **Understand the concepts you just saw:** [Realms](../../product/concepts/realms.md), [Consensus](../../product/concepts/consensus.md), [Zero-trust by default](../../product/concepts/zero-trust.md).
 - **Understand the bigger picture:** [Architecture overview](../../architecture/overview.md) + [why the supervisor is built on LangGraph (ADR-0001)](../../architecture/adr/0001-langgraph-supervisor.md).
-- **Plan forward:** the epics + stories planning artifact at `_bmad-output/planning-artifacts/epics.md` (in the repo) shows what lights up next — Story 3.2 consensus beyond placeholder, Story 3.3 canvas↔core channel, Epic 2 realm provisioning.
+- **Plan forward:** the epics + stories planning artifact at `_bmad-output/planning-artifacts/epics.md` (in the repo) tracks Epic 3 (done through 3.3), Epic 2 (spin + terraform + egress through 2.3), Safety Fortress on Epic 4 (Story 4.2 anomaly/quarantine shipped), and mesh / observability work (Epic 5–6).

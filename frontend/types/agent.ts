@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
 
-export type AgentStatus = 'healthy' | 'degraded' | 'critical' | 'pending';
+export type AgentStatus = 'healthy' | 'degraded' | 'critical' | 'pending' | 'quarantined';
 
 export type AgentRole = 'human' | 'grok' | 'security' | 'code' | 'custom';
 
