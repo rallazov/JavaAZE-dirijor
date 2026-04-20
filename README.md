@@ -45,7 +45,8 @@ dependency). Story 4.1 adds verified semantic cache HTTP surfaces and bumps
 `schema_version` to **5**. Story **4.2** shipped optional anomaly policy +
 quarantine HTTP surfaces (`GET /safety/quarantine/...`, gated
 `POST /safety/signal`) and bumped `schema_version` to **6** (additive — all
-prior keys preserved).
+prior keys preserved). Story **4.3** adds gated **`POST /audit/export`**
+(immutable audit ZIP bundles) and bumps `schema_version` to **7**.
 
 - `GET /` — service identity + aggregate status + per-dependency readiness.
 - `GET /health` — same dependency map, `timestamp`, and HTTP **200** when every
@@ -63,7 +64,7 @@ prior keys preserved).
 {
   "service": "dirijor-supervisor",
   "version": "0.1.0",
-  "schema_version": 6,
+  "schema_version": 8,
   "status": "operational",
   "consensus_engine": "ready",
   "uptime_s": 12.4,
@@ -74,12 +75,12 @@ prior keys preserved).
     "realm_manager":     { "ready": true,  "required": true,  "detail": null },
     "semantic_cache":    { "ready": false, "required": false, "detail": "not configured" },
     "anomaly_policy":    { "ready": true,  "required": false, "detail": null },
-    "mesh":              { "ready": false, "required": false, "detail": "planned — see Story 5.1" }
+    "mesh":              { "ready": true, "required": false, "detail": "mesh bootstrap disabled (set DIRIJOR_MESH_BOOTSTRAP_ENABLED=1 to opt in)" }
   },
   "realtime": {
     "connections": 0,
     "heartbeat_interval_s": 15.0,
-    "schema_version": 6
+    "schema_version": 8
   }
 }
 ```
@@ -90,7 +91,7 @@ prior keys preserved).
 {
   "status": "ok",
   "version": "0.1.0",
-  "schema_version": 6,
+  "schema_version": 8,
   "uptime_s": 12.4,
   "timestamp": "2026-04-16T10:12:44.117Z",
   "checks": {
@@ -100,7 +101,7 @@ prior keys preserved).
     "realm_manager":     { "ready": true,  "required": true,  "detail": null },
     "semantic_cache":    { "ready": false, "required": false, "detail": "not configured" },
     "anomaly_policy":    { "ready": true,  "required": false, "detail": null },
-    "mesh":              { "ready": false, "required": false, "detail": "planned — see Story 5.1" }
+    "mesh":              { "ready": true, "required": false, "detail": "mesh bootstrap disabled (set DIRIJOR_MESH_BOOTSTRAP_ENABLED=1 to opt in)" }
   }
 }
 ```
@@ -228,7 +229,8 @@ on every Pydantic model, additive-only response shapes. Story 2.2 bumped
 `SCHEMA_VERSION` to `4` (destroy route + SpinError extensions); Story 4.1
 bumped it to `5` (semantic-cache endpoints + consensus cache fields); Story
 4.2 bumped it to `6` (Safety Fortress quarantine list + signal hook + optional
-consensus `realm_id`) — see
+consensus `realm_id`); Story 4.3 → `7` (audit export); Story 5.1 → `8` (mesh
+bootstrap + preauth route) — see
 [`docs/reference/supervisor-api.md`](docs/reference/supervisor-api.md).
 
 - **`POST /realms/spin`** — enqueue a job. Accepts
@@ -245,6 +247,19 @@ consensus `realm_id`) — see
   `mesh_endpoint: noop://<realm_id>` **(local-noop)**). Story 2.2 registers
   `TerraformAdapter` behind the same `RealmAdapter` `Protocol`; Story 2.3 wraps `.provision`
   with default-deny egress.
+
+**Story 5.1 — mesh bootstrap (optional, operator-gated).** When
+`DIRIJOR_MESH_BOOTSTRAP_ENABLED` is truthy (`1` / `true` / `yes`, same style as
+audit export / safety signals), set **`DIRIJOR_HEADSCALE_API_URL`**
+(`https://<host>/api/v1`) and **`DIRIJOR_HEADSCALE_API_KEY`**. After IaC reaches
+`phase == ready`, Core calls Headscale to ensure a **user** named like the
+`realm_id`, applies realm-scoped ACL tags on preauth keys
+(`tag:dirijor:realm:<realm_id>`), and adds **`outputs.mesh`** +
+**`outputs.headscale_control_url`** while keeping the legacy **`mesh_endpoint`**
+(`noop://…` / `tf://…`). Long-lived secrets are **not** placed on the poll body;
+mint a join key once via **`POST /realms/{job_id}/mesh/preauth-key`**. Development
+was exercised against **Headscale 0.23.x** REST shapes — pin your control plane
+to match.
 
 ```bash
 # Smoke: spin + poll (local-noop — noop:// mesh endpoint)

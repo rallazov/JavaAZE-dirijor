@@ -31,7 +31,8 @@ later stories so the firewall applies.
 
 - **In scope:** one `digitalocean_vpc`, one `digitalocean_firewall`, outputs for
   VPC id, CIDR, region, firewall id.
-- **Story 5.1:** mesh enrollment (Headscale) and `outputs.mesh_endpoint` consumption.
+- **Story 5.1:** supervisor-side Headscale enrollment after spin (`outputs.mesh_endpoint`
+  placeholder preserved; see `docs/reference/supervisor-api.md`) — this Terraform module is unchanged.
 - **Story 5.3:** Firecracker-capable host droplets inside the VPC.
 
 See [`docs/architecture/adr/0003-terraform-adapter-v0.md`](../../../docs/architecture/adr/0003-terraform-adapter-v0.md),

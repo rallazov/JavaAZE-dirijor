@@ -1,20 +1,20 @@
 // Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
-// Secure OpenClaw Agent Wrapper – Auto-joins Headscale mesh
+// Secure OpenClaw Agent Wrapper — tool allowlist + application-layer egress stub (Story 5.2)
 
-const http = require('http');
+const { loadPolicy } = require('./lib/policy');
+const { createServer } = require('./lib/server');
 
 const HEADSCALE_URL = process.env.HEADSCALE_URL || 'http://localhost:8080';
 const REALM_NAME = process.env.REALM_NAME || 'default-realm';
-const PORT = 3001;
+const PORT = Number(process.env.PORT || '3001') || 3001;
+const BUILD_ID = process.env.DIRIJOR_WRAPPER_BUILD_ID || 'dev';
 
-const server = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-        agent: 'openclaw-wrapper',
-        realm: REALM_NAME,
-        status: 'ready',
-        mesh: HEADSCALE_URL,
-    }));
+const policy = loadPolicy();
+const server = createServer(policy, {
+    realm: REALM_NAME,
+    headscaleUrl: HEADSCALE_URL,
+    port: PORT,
+    buildId: BUILD_ID,
 });
 
 server.listen(PORT, () => {

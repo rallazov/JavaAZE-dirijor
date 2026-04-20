@@ -63,7 +63,7 @@ import time
 import traceback
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Protocol, Self, Sequence, TypedDict, get_args
 
@@ -71,6 +71,7 @@ from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketD
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
+import httpx
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -84,6 +85,8 @@ from qdrant_client.models import (
     VectorParams,
 )
 
+import audit_export as audit_export_lib
+import mesh_bootstrap as mesh_bootstrap_lib
 from safety_policy import (
     AnomalyPolicyDocument,
     load_anomaly_policy_from_path,
@@ -125,7 +128,15 @@ SERVICE_VERSION = "0.1.0"
 #     `anomaly_policy` readiness entry (required: false; invalid policy file
 #     degrades this probe only). WebSocket payloads remain existing
 #     `topology.delta` / `hitl.pending` types with additive agent fields.
-SCHEMA_VERSION = 6
+#   v7 (Story 4.3, 2026-04-19) — Immutable audit export: gated
+#     `POST /audit/export` (ZIP bundle); realm-scoped in-memory audit ring;
+#     new `SpinError` codes `audit_export_disabled`, `audit_export_too_large`,
+#     `audit_export_invalid_window`.
+#   v8 (Story 5.1, 2026-04-19) — Mesh bootstrap: optional gated automation
+#     after `phase == ready`; additive `outputs.mesh`, `outputs.headscale_control_url`;
+#     `POST /realms/{job_id}/mesh/preauth-key` + `POST /realms/{job_id}/mesh/retry`;
+#     WebSocket `realm.mesh.state`; new `SpinError` codes for mesh HTTP surface.
+SCHEMA_VERSION = 8
 STARTED_AT = time.monotonic()
 STARTUP_GRACE_S = 1.0
 
@@ -154,6 +165,7 @@ _SUPPORTED_EVENT_TYPES: tuple[str, ...] = (
     "topology.delta",
     "metrics.update",
     "hitl.pending",
+    "realm.mesh.state",
     "heartbeat",
     "session.bye",
 )
@@ -988,8 +1000,16 @@ def _probe_anomaly_policy() -> tuple[bool, str | None]:
 
 
 def _probe_mesh() -> tuple[bool, str | None]:
-    # Headscale/Tailscale bootstrap lands in Story 5.1.
-    return False, "planned — see Story 5.1"
+    """Optional dep — bootstrap is operator-gated; never blocks `/health` 200."""
+    if not mesh_bootstrap_lib.mesh_bootstrap_enabled():
+        return True, "mesh bootstrap disabled (set DIRIJOR_MESH_BOOTSTRAP_ENABLED=1 to opt in)"
+    if mesh_bootstrap_lib.headscale_credentials_configured():
+        return True, None
+    return (
+        False,
+        "mesh bootstrap enabled but Headscale API URL/key missing "
+        "(DIRIJOR_HEADSCALE_API_URL + DIRIJOR_HEADSCALE_API_KEY)",
+    )
 
 
 def _probe_realtime_channel() -> tuple[bool, str | None]:
@@ -1368,6 +1388,42 @@ class SafetySignalRequest(BaseModel):
     evidence: dict[str, Any] = Field(default_factory=dict)
 
 
+class AuditExportRequest(BaseModel):
+    """`POST /audit/export` body — UTC half-open window ``[window_start, window_end)``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    realm_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
+    window_start: str
+    window_end: str
+
+    @field_validator("window_start", "window_end")
+    @classmethod
+    def _audit_window_utc_z(cls, v: str) -> str:
+        s = str(v).strip()
+        try:
+            audit_export_lib.parse_utc_iso_z(s)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        return s
+
+    @model_validator(mode="after")
+    def _audit_window_half_open_and_span(self) -> Self:
+        ws = audit_export_lib.parse_utc_iso_z(self.window_start)
+        we = audit_export_lib.parse_utc_iso_z(self.window_end)
+        if we <= ws:
+            raise ValueError(
+                "window_end must be strictly after window_start "
+                "(half-open interval [window_start, window_end) in UTC)"
+            )
+        max_h = audit_export_lib.export_max_window_hours()
+        if (we - ws) > timedelta(hours=max_h):
+            raise ValueError(
+                f"window span exceeds DIRIJOR_AUDIT_EXPORT_MAX_WINDOW_HOURS={max_h}"
+            )
+        return self
+
+
 async def _record_quarantine_and_broadcast(
     *,
     realm_id: str,
@@ -1384,6 +1440,7 @@ async def _record_quarantine_and_broadcast(
     key = (realm_id, agent_id, rule_id)
     now_mono = time.monotonic()
     emit_ws: bool
+    new_record: QuarantineRecord | None = None
     async with _QUARANTINE_LOCK:
         prev = _QUARANTINE_DEDUPE_LAST.get(key)
         emit_ws = prev is None or (now_mono - prev) >= QUARANTINE_DEDUPE_WINDOW_S
@@ -1399,12 +1456,26 @@ async def _record_quarantine_and_broadcast(
             if emit_ws
             else (existing.quarantined_at if existing else now_wall)
         )
-        bucket[rec_key] = QuarantineRecord(
+        rec = QuarantineRecord(
             realm_id=realm_id,
             agent_id=agent_id,
             rule_id=rule_id,
             quarantined_at=quarantined_at,
             evidence=merged_evidence,
+        )
+        bucket[rec_key] = rec
+        if existing is None:
+            new_record = rec
+
+    if new_record is not None:
+        await audit_export_lib.append_quarantine_new(
+            realm_id,
+            audit_export_lib.SafetyQuarantineAuditPayload(
+                agent_id=new_record.agent_id,
+                rule_id=new_record.rule_id,
+                quarantined_at=new_record.quarantined_at,
+                evidence=dict(new_record.evidence),
+            ),
         )
 
     if not emit_ws:
@@ -1644,6 +1715,20 @@ async def run_consensus(
         },
     )
 
+    if req.realm_id:
+        await audit_export_lib.append_consensus_completed(
+            req.realm_id,
+            audit_export_lib.ConsensusCompletedAuditPayload(
+                decision=payload.decision,
+                consensus_score=payload.consensus_score,
+                termination_reason=payload.termination_reason,
+                rounds=payload.rounds,
+                threshold=payload.threshold,
+                vote_count=len(payload.votes),
+                message_count=len(payload.messages),
+            ),
+        )
+
     await _run_anomaly_after_consensus(req, payload, opinions)
 
     return payload
@@ -1709,6 +1794,14 @@ SpinErrorCode = Literal[
     "destroy_invalid_state",
     "destroy_already_requested",
     "egress_policy_denied",
+    "audit_export_disabled",
+    "audit_export_too_large",
+    "audit_export_invalid_window",
+    "mesh_bootstrap_disabled",
+    "mesh_preauth_consumed",
+    "mesh_preauth_not_eligible",
+    "mesh_headscale_api_error",
+    "mesh_retry_conflict",
 ]
 _SPIN_ERROR_CODES: tuple[str, ...] = get_args(SpinErrorCode)
 
@@ -1842,6 +1935,23 @@ class SpinJob(BaseModel):
     agent_count: int
     outputs: dict[str, Any] = Field(default_factory=dict)
     error: SpinError | None = None
+    schema_version: int
+
+
+class MeshPreauthKeyResponse(BaseModel):
+    """One-shot preauth secret — never stored on ``SpinJob.outputs`` (Story 5.1)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    preauth_key: str
+    expires_at: str
+    schema_version: int
+
+
+class MeshRetryAccepted(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["accepted"] = "accepted"
     schema_version: int
 
 
@@ -2654,6 +2764,138 @@ def _log_job_done(
     )
 
 
+async def _run_mesh_bootstrap_after_ready(job: SpinJob) -> None:
+    """Story 5.1 — Headscale enrollment after IaC success; never mutates ``phase``."""
+    if not mesh_bootstrap_lib.mesh_bootstrap_enabled():
+        return
+
+    correlation_id = uuid.uuid4().hex[:12]
+
+    def aborted() -> bool:
+        return bool(job.outputs.get("destroy_requested_at"))
+
+    async def _emit_mesh_event(
+        status: str, **extra: Any
+    ) -> None:
+        payload: dict[str, Any] = {
+            "job_id": job.job_id,
+            "status": status,
+            "correlation_id": correlation_id,
+        }
+        payload.update(extra)
+        await broadcast_event(job.realm_id, "realm.mesh.state", payload)
+
+    if not mesh_bootstrap_lib.headscale_credentials_configured():
+        if aborted():
+            return
+        err_mesh: dict[str, Any] = {
+            "status": "failed",
+            "code": "mesh_headscale_config_missing",
+            "message": (
+                "DIRIJOR_HEADSCALE_API_URL and DIRIJOR_HEADSCALE_API_KEY are "
+                "required when DIRIJOR_MESH_BOOTSTRAP_ENABLED is truthy"
+            ),
+            "correlation_id": correlation_id,
+        }
+        _mutate_outputs(job, mesh=err_mesh)
+        mesh_bootstrap_lib.log_bootstrap_finished(
+            realm_id=job.realm_id,
+            job_id=job.job_id,
+            correlation_id=correlation_id,
+            status="failed",
+            code="mesh_headscale_config_missing",
+        )
+        await _emit_mesh_event("failed", code="mesh_headscale_config_missing")
+        return
+
+    api_url = os.environ.get("DIRIJOR_HEADSCALE_API_URL", "").strip().rstrip("/")
+    api_key = os.environ.get("DIRIJOR_HEADSCALE_API_KEY", "").strip()
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    try:
+        async with httpx.AsyncClient(
+            base_url=api_url, headers=headers, timeout=30.0
+        ) as hs_client:
+            patch = await mesh_bootstrap_lib.bootstrap_ready_realm(
+                realm_id=job.realm_id,
+                correlation_id=correlation_id,
+                aborted=aborted,
+                client=hs_client,
+            )
+    except mesh_bootstrap_lib.HeadscaleMeshError as exc:
+        if exc.code == "mesh_bootstrap_aborted":
+            mesh_bootstrap_lib.log_bootstrap_finished(
+                realm_id=job.realm_id,
+                job_id=job.job_id,
+                correlation_id=correlation_id,
+                status="aborted",
+                code=exc.code,
+            )
+            return
+        err_mesh = {
+            "status": "failed",
+            "code": exc.code,
+            "message": exc.message,
+            "correlation_id": correlation_id,
+        }
+        if exc.http_status is not None:
+            err_mesh["http_status"] = exc.http_status
+        _mutate_outputs(job, mesh=err_mesh)
+        mesh_bootstrap_lib.log_bootstrap_finished(
+            realm_id=job.realm_id,
+            job_id=job.job_id,
+            correlation_id=correlation_id,
+            status="failed",
+            code=exc.code,
+        )
+        await _emit_mesh_event("failed", code=exc.code, message=exc.message)
+        return
+    except Exception:
+        logger.exception(
+            "mesh.bootstrap.crash",
+            extra={
+                "event": "mesh.bootstrap.crash",
+                "realm_id": job.realm_id,
+                "job_id": job.job_id,
+                "correlation_id": correlation_id,
+            },
+        )
+        err_mesh = {
+            "status": "failed",
+            "code": "mesh_bootstrap_internal",
+            "message": "unexpected mesh bootstrap failure",
+            "correlation_id": correlation_id,
+        }
+        _mutate_outputs(job, mesh=err_mesh)
+        mesh_bootstrap_lib.log_bootstrap_finished(
+            realm_id=job.realm_id,
+            job_id=job.job_id,
+            correlation_id=correlation_id,
+            status="failed",
+            code="mesh_bootstrap_internal",
+        )
+        await _emit_mesh_event("failed", code="mesh_bootstrap_internal")
+        return
+
+    if aborted():
+        mesh_bootstrap_lib.log_bootstrap_finished(
+            realm_id=job.realm_id,
+            job_id=job.job_id,
+            correlation_id=correlation_id,
+            status="aborted",
+        )
+        return
+
+    _mutate_outputs(job, **patch)
+    mesh_bootstrap_lib.log_bootstrap_finished(
+        realm_id=job.realm_id,
+        job_id=job.job_id,
+        correlation_id=correlation_id,
+        status="ready",
+    )
+    await _emit_mesh_event("ready")
+
+
 # TODO(6.1): wrap `_run_spin_job` in an OTel span once Story 6.1 lands.
 async def _run_spin_job(
     job: SpinJob, req: SpinRequest, adapter: RealmAdapter
@@ -2733,6 +2975,8 @@ async def _run_spin_job(
 
         error_source = "post-provision"
         _update_job(job, phase="ready", outputs=outputs)
+        error_source = "mesh-bootstrap"
+        await _run_mesh_bootstrap_after_ready(job)
     except asyncio.CancelledError:
         # Cooperative cancellation: re-raise so the event loop can reap
         # the task. The `finally:` block still releases the realm_id so
@@ -2897,6 +3141,85 @@ async def list_quarantined_agents(realm_id: str) -> QuarantineListResponse | JSO
             for rec in bucket.values()
         ]
     return QuarantineListResponse(items=items, schema_version=SCHEMA_VERSION)
+
+
+@app.post(
+    "/audit/export",
+    response_model=None,
+    responses={
+        400: {"model": SpinError},
+        403: {"model": SpinError},
+        413: {"model": SpinError},
+    },
+)
+async def export_audit_package(req: AuditExportRequest) -> Response | JSONResponse:
+    """Download a ZIP audit bundle for a realm and UTC half-open time window.
+
+    Disabled unless ``DIRIJOR_AUDIT_EXPORT_ENABLED`` matches the same truthiness
+    convention as ``DIRIJOR_SAFETY_SIGNALS_ENABLED`` (``1`` / ``true`` /
+    ``yes``). v0 assumes a private network posture — see ``supervisor-api.md``.
+    """
+    if not audit_export_lib.audit_export_enabled():
+        return _spin_error_response(
+            403,
+            "audit_export_disabled",
+            "POST /audit/export is disabled; set DIRIJOR_AUDIT_EXPORT_ENABLED=1 to enable",
+            {"env": "DIRIJOR_AUDIT_EXPORT_ENABLED"},
+        )
+
+    ws = audit_export_lib.parse_utc_iso_z(req.window_start)
+    we = audit_export_lib.parse_utc_iso_z(req.window_end)
+    events = await audit_export_lib.filtered_events(req.realm_id, ws, we)
+
+    async with _QUARANTINE_LOCK:
+        bucket = _QUARANTINE_BY_REALM.get(req.realm_id, {})
+        q_items = [
+            {
+                "realm_id": rec.realm_id,
+                "agent_id": rec.agent_id,
+                "rule_id": rec.rule_id,
+                "quarantined_at": rec.quarantined_at,
+                "evidence": rec.evidence,
+            }
+            for rec in bucket.values()
+        ]
+
+    export_id = str(uuid.uuid4())
+    try:
+        body = audit_export_lib.build_audit_zip(
+            export_id=export_id,
+            realm_id=req.realm_id,
+            window_start=req.window_start.strip(),
+            window_end=req.window_end.strip(),
+            window_semantics="half_open_utc",
+            events=events,
+            quarantine_items=q_items,
+            service_version=SERVICE_VERSION,
+            schema_version=SCHEMA_VERSION,
+        )
+    except audit_export_lib.AuditExportTooLarge as exc:
+        return _spin_error_response(
+            413,
+            "audit_export_too_large",
+            (
+                f"estimated uncompressed payload exceeds "
+                f"DIRIJOR_AUDIT_EXPORT_MAX_UNCOMPRESSED_BYTES={exc.limit_bytes}"
+            ),
+            {
+                "limit_bytes": exc.limit_bytes,
+                "estimated_bytes": exc.estimated_bytes,
+            },
+        )
+
+    safe_realm = re.sub(r"[^a-zA-Z0-9_-]+", "_", req.realm_id)[:64]
+    filename = f"dirijor-audit-{safe_realm}-{export_id}.zip"
+    return Response(
+        content=body,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
 
 
 @app.post(
@@ -3142,10 +3465,152 @@ async def delete_realm_job_route(job_id: str) -> Any:
         )
 
 
+@app.post(
+    "/realms/{job_id}/mesh/preauth-key",
+    response_model=MeshPreauthKeyResponse,
+    responses={
+        404: {"model": SpinError},
+        409: {"model": SpinError},
+        410: {"model": SpinError},
+        502: {"model": SpinError},
+    },
+)
+async def post_realm_mesh_preauth_key(job_id: str) -> Any:
+    """Mint a single-use Headscale preauth key; poll does not echo the secret."""
+    job = _SPIN_JOBS.get(job_id)
+    if job is None:
+        return _spin_error_response(
+            404,
+            "job_not_found",
+            f"no spin job with id {job_id!r} is registered",
+            {"job_id": job_id},
+        )
+    if job.phase != "ready":
+        return _spin_error_response(
+            409,
+            "mesh_preauth_not_eligible",
+            "mesh preauth requires phase=ready",
+            {"current_phase": job.phase},
+        )
+    if job.outputs.get("destroy_requested_at") or job.outputs.get("destroyed"):
+        return _spin_error_response(
+            409,
+            "destroy_invalid_state",
+            "cannot mint mesh preauth while destroy is in progress or completed",
+            {},
+        )
+    if job.outputs.get("mesh_preauth_issued_at"):
+        return _spin_error_response(
+            410,
+            "mesh_preauth_consumed",
+            "preauth key was already issued for this job; rotate via a new spin",
+            {"job_id": job_id},
+        )
+
+    mesh = job.outputs.get("mesh")
+    if not isinstance(mesh, dict) or mesh.get("status") != "ready":
+        return _spin_error_response(
+            409,
+            "mesh_preauth_not_eligible",
+            "mesh bootstrap did not reach ready state for this job",
+            {},
+        )
+    uid = mesh.get("headscale_user_id")
+    if uid is None:
+        return _spin_error_response(
+            409,
+            "mesh_preauth_not_eligible",
+            "mesh outputs missing headscale_user_id",
+            {},
+        )
+
+    if not mesh_bootstrap_lib.headscale_credentials_configured():
+        return _spin_error_response(
+            502,
+            "mesh_headscale_api_error",
+            "Headscale API credentials are not configured on this supervisor",
+            {},
+        )
+
+    api_url = os.environ.get("DIRIJOR_HEADSCALE_API_URL", "").strip().rstrip("/")
+    api_key = os.environ.get("DIRIJOR_HEADSCALE_API_KEY", "").strip()
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    try:
+        async with httpx.AsyncClient(
+            base_url=api_url, headers=headers, timeout=30.0
+        ) as hs_client:
+            key, exp = await mesh_bootstrap_lib.issue_preauth_key(
+                user_id=int(uid),
+                realm_id=job.realm_id,
+                client=hs_client,
+            )
+    except mesh_bootstrap_lib.HeadscaleMeshError as exc:
+        return _spin_error_response(
+            502,
+            "mesh_headscale_api_error",
+            exc.message,
+            {"upstream_status": exc.http_status, "code": exc.code},
+        )
+
+    _mutate_outputs(job, mesh_preauth_issued_at=_iso_now())
+    return MeshPreauthKeyResponse(
+        preauth_key=key,
+        expires_at=exp,
+        schema_version=SCHEMA_VERSION,
+    )
+
+
+@app.post(
+    "/realms/{job_id}/mesh/retry",
+    response_model=MeshRetryAccepted,
+    responses={
+        404: {"model": SpinError},
+        403: {"model": SpinError},
+        409: {"model": SpinError},
+    },
+)
+async def post_realm_mesh_retry(job_id: str) -> Any:
+    """Operator recovery after transient Headscale failures (idempotent user ensure)."""
+    if not mesh_bootstrap_lib.mesh_bootstrap_enabled():
+        return _spin_error_response(
+            403,
+            "mesh_bootstrap_disabled",
+            "mesh retry requires DIRIJOR_MESH_BOOTSTRAP_ENABLED truthy",
+            {"env": "DIRIJOR_MESH_BOOTSTRAP_ENABLED"},
+        )
+    job = _SPIN_JOBS.get(job_id)
+    if job is None:
+        return _spin_error_response(
+            404,
+            "job_not_found",
+            f"no spin job with id {job_id!r} is registered",
+            {"job_id": job_id},
+        )
+    if job.phase != "ready":
+        return _spin_error_response(
+            409,
+            "mesh_retry_conflict",
+            "mesh retry requires phase=ready",
+            {"current_phase": job.phase},
+        )
+    if job.outputs.get("destroy_requested_at") or job.outputs.get("destroyed"):
+        return _spin_error_response(
+            409,
+            "destroy_invalid_state",
+            "cannot retry mesh while destroy is in progress or completed",
+            {},
+        )
+
+    await _run_mesh_bootstrap_after_ready(job)
+    return MeshRetryAccepted(schema_version=SCHEMA_VERSION)
+
+
 # String-prefix match on request.url.path; scoped to the Story 2.1
 # endpoints so the Story 3.2 /consensus surface keeps its default
 # Pydantic 422 body (tests in that block rely on it).
 _SPIN_PATH_PREFIX = "/realms/"
+_AUDIT_EXPORT_PATH = "/audit/export"
 
 # Pydantic v2 error `type` values that map to the closed
 # `invalid_realm_id` code when they fire on the `realm_id` field.
@@ -3202,6 +3667,32 @@ async def _spin_validation_exception_handler(
       - malformed `realm_id` (pattern/length)
         → `code="invalid_realm_id"`
     """
+    if request.url.path == _AUDIT_EXPORT_PATH:
+        errors = list(exc.errors())
+        first_msg = (
+            errors[0].get("msg", "invalid audit export request")
+            if errors
+            else "invalid audit export request"
+        )
+        details = {
+            "errors": jsonable_encoder(
+                [
+                    {
+                        "loc": list(e.get("loc", ())),
+                        "type": e.get("type", ""),
+                        "msg": e.get("msg", ""),
+                    }
+                    for e in errors
+                ]
+            )
+        }
+        return _spin_error_response(
+            400,
+            "audit_export_invalid_window",
+            str(first_msg),
+            details,
+        )
+
     if not request.url.path.startswith(_SPIN_PATH_PREFIX):
         # Preserve FastAPI's default for non-spin endpoints.
         return JSONResponse(
@@ -3291,11 +3782,11 @@ _CONNECTIONS: dict[str, set[_WsSession]] = {}
 
 
 def _authorize_realm(realm_id: str) -> tuple[bool, str | None]:
-    """Realm authorization hook — v0.1 no-op, Story 5.1 extension point.
+    """Realm authorization hook — v0.1 no-op.
 
     Returns `(ok, reason)`. `ok == False` → handshake is rejected with WS
-    close code 4403. Story 5.1 (mesh identity) will replace the body with a
-    real auth check (Headscale/Tailscale or a scoped WS token from spin).
+    close code 4403. Story 5.1 delivers mesh **enrollment via HTTP** +
+    Headscale API; scoped WS tokens / mesh-bound auth remain a follow-on.
     Keeping this stub as a named function keeps the route body stable.
     """
 

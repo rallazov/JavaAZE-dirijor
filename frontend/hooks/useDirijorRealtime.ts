@@ -96,6 +96,9 @@ export function useDirijorRealtime(
           case 'hitl.pending':
             store.applyHitlPending(event.payload);
             break;
+          case 'realm.mesh.state':
+            // Story 5.1 — enrollment is visible on GET /realms/{job_id} outputs.
+            break;
           case 'session.hello':
           case 'heartbeat':
           case 'session.bye':

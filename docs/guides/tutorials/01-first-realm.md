@@ -5,7 +5,7 @@ Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
 # Tutorial — Your first local Dirijor environment
 
 > **Last verified:** 2026-04-19, against `docs/reference/supervisor-api.md`
-> (`schema_version` **6** on `GET /` after Story 4.2). Re-run the curl +
+> (`schema_version` **8** on `GET /` after Story 5.1). Re-run the curl +
 > pytest steps after any `SCHEMA_VERSION` bump.
 
 **Time:** 10–15 minutes.
@@ -17,8 +17,9 @@ Node 18+, Python 3.12+, and git.
 ## Why this tutorial matters
 
 Dirijor's end-state is a one-click private realm on the cloud of your
-choice. **v0.1 is not there yet** — mesh bootstrap and full Safety
-Fortress automation are still growing (Stories 4.3, 5.1+). What *is*
+choice. **v0.1 is not there yet** — optional mesh bootstrap (Story 5.1) and
+full Safety Fortress automation continue to grow (e.g. OpenClaw egress 5.2).
+What *is*
 there locally is the **supervisor** (HTTP + WebSocket + consensus +
 optional semantic cache + realm spin/destroy), and the **Network Canvas**
 UI. Running both together is the fastest way to:
@@ -95,7 +96,7 @@ You should see a response whose shape matches this (values will differ):
 {
   "service": "dirijor-supervisor",
   "version": "0.1.0",
-  "schema_version": 6,
+  "schema_version": 8,
   "status": "operational",
   "consensus_engine": "ready",
   "uptime_s": 4.8,
@@ -106,19 +107,21 @@ You should see a response whose shape matches this (values will differ):
     "realm_manager":     { "ready": true,  "required": true,  "detail": null },
     "semantic_cache":    { "ready": false, "required": false, "detail": "not configured" },
     "anomaly_policy":    { "ready": true,  "required": false, "detail": null },
-    "mesh":              { "ready": false, "required": false, "detail": "planned — see Story 5.1" }
+    "mesh":              { "ready": true, "required": false, "detail": "mesh bootstrap disabled (set DIRIJOR_MESH_BOOTSTRAP_ENABLED=1 to opt in)" }
   },
   "realtime": {
     "connections": 0,
     "heartbeat_interval_s": 15.0,
-    "schema_version": 6
+    "schema_version": 8
   }
 }
 ```
 
 !!! tip "What to notice"
     Optional subsystems (`semantic_cache`, `anomaly_policy`, `mesh`) stay `required: false`
-    so local dev works without Qdrant, a policy file, or mesh. `semantic_cache.detail`
+    so local dev works without Qdrant, a policy file, or Headscale. With mesh
+    bootstrap **off** (default), `mesh.ready` is **true** and `detail` explains the
+    opt-in env gate. `semantic_cache.detail`
     reads **`not configured`** until `QDRANT_URL` (and friends) are set —
     see the API reference. `realtime.connections` counts open WebSocket
     sessions (in-process; zero with no canvas clients).

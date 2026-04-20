@@ -95,7 +95,7 @@ and [Concept — Consensus](../product/concepts/consensus.md).
   (`DIRIJOR_ANOMALY_POLICY_PATH`), post-consensus + optional gated `POST /safety/signal`
   evaluation, in-process per-realm registry, `GET /safety/quarantine/{realm_id}`,
   canvas notifications via existing `topology.delta` / `hitl.pending` types.
-- Audit export package: **Story 4.3** (backlog).
+- Audit export package: **Story 4.3** *(shipped — gated `POST /audit/export`)*.
 
 ---
 
@@ -128,8 +128,8 @@ Firecracker (Story 5.3 explicit).
 
 **Bindings today (v0.1).**
 
-- `POST /realms/spin` + `DELETE /realms/{job_id}` + `GET /realms/{job_id}` with the `terraform-digitalocean` adapter available when **`DIGITALOCEAN_TOKEN`** and a terraform binary are configured (Story 2.2, 2026-04-18). Story 2.3 (2026-04-19) adds **`EgressPolicyRealmAdapter`** (pre-validate / pre-provision hook → `egress_policy_denied`) and **`terraform/modules/private-realm`** firewall rules with default-deny public Internet egress; optional **`DIRIJOR_ALLOW_PUBLIC_EGRESS`** adds explicit outbound to the Internet in Terraform. Story 5.1 consumes `outputs.mesh_endpoint`.
-- Mesh bootstrap automation: Story 5.1 (consumes `SpinJob.outputs.mesh_endpoint`).
+- `POST /realms/spin` + `DELETE /realms/{job_id}` + `GET /realms/{job_id}` with the `terraform-digitalocean` adapter available when **`DIGITALOCEAN_TOKEN`** and a terraform binary are configured (Story 2.2, 2026-04-18). Story 2.3 (2026-04-19) adds **`EgressPolicyRealmAdapter`** (pre-validate / pre-provision hook → `egress_policy_denied`) and **`terraform/modules/private-realm`** firewall rules with default-deny public Internet egress; optional **`DIRIJOR_ALLOW_PUBLIC_EGRESS`** adds explicit outbound to the Internet in Terraform.
+- Mesh bootstrap automation: **Story 5.1** *(shipped — optional)* — after `phase == ready`, gated by **`DIRIJOR_MESH_BOOTSTRAP_ENABLED`**, Headscale HTTP API (`DIRIJOR_HEADSCALE_API_URL` + `DIRIJOR_HEADSCALE_API_KEY`) ensures a realm-scoped user + tags; **`outputs.mesh`**, **`outputs.headscale_control_url`**, legacy **`mesh_endpoint`** preserved; one-shot **`POST /realms/{job_id}/mesh/preauth-key`**; WebSocket **`realm.mesh.state`**; destroy wins over in-flight bootstrap.
 - Firecracker lifecycle: Story 5.3 (may trail MVP).
 
 ---
@@ -149,7 +149,7 @@ now" becomes true or false.
 
 **Bindings today (v0.1).**
 
-- OpenClaw tool surface + egress policy: Story 5.2.
+- OpenClaw tool surface + **application-layer** egress stub: **Story 5.2** *(shipped)* — `backend/openclaw-wrapper` serves `GET /health`, `POST /v1/tools/invoke` (allowlist + structured denials with `audit_id`), and `POST /v1/egress/check` (URL class stub; `deny_public` vs `allowlist` via env / JSON policy file). See `backend/openclaw-wrapper/README.md`. Infrastructure egress remains Story 2.3 / ADR-0004.
 - Integration with supervisor + canvas: follows Epic 3/5 completion.
 
 ---
@@ -185,10 +185,11 @@ is a liability, not a feature.
 ## The honest summary
 
 At v0.1, the **shape** of all four layers exists — canvas, supervisor
-contract, docker-compose, wrapper skeleton — but only the canvas shell
-and the supervisor contract are production-grade. The rest is wired
-into the readiness registry so every dependency can be asked *are you
-real yet?* and answer honestly.
+contract, docker-compose, and a **policy-aware** OpenClaw wrapper HTTP
+surface (Story 5.2) — but only the canvas shell and the supervisor
+contract are production-grade end-to-end. The rest is wired into the
+readiness registry so every dependency can be asked *are you real yet?*
+and answer honestly.
 
 That honesty is the point: when Dirijor claims "zero hallucination on
 high-stakes outputs" or "100% private by default," the

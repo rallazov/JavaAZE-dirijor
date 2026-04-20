@@ -12,11 +12,16 @@ services:
     environment:
       - HEADSCALE_URL=your-headscale-control-plane
       - REALM_NAME=finance-swarm-001
+      # Story 5.2 — application-layer tool allowlist + egress stub (empty/missing allowlist = deny all tools)
+      # - DIRIJOR_TOOL_ALLOWLIST=noop,internal_lookup
+      # - DIRIJOR_EGRESS_MODE=deny_public
+      # - DIRIJOR_WRAPPER_POLICY_PATH=/etc/dirijor/wrapper-policy.json
     depends_on: [dirijor-supervisor]
   harper-security:
     build: ./backend/openclaw-wrapper
     environment:
       - HEADSCALE_URL=your-headscale-control-plane
+      # Story 5.2 — wire the same policy vars as grok-agent when you split tool surfaces per realm
 
   # Optional local Qdrant for verified semantic cache (Story 4.1). Supervisor stays healthy
   # without it. Production: use private networking, API keys, and TLS (Qdrant security guide).

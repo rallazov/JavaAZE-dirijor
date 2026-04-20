@@ -22,6 +22,7 @@ export type DirijorRealtimeEventType =
   | 'topology.delta'
   | 'metrics.update'
   | 'hitl.pending'
+  | 'realm.mesh.state'
   | 'heartbeat'
   | 'session.bye';
 
@@ -72,6 +73,16 @@ export interface HitlPendingPayload {
 }
 export type HitlPendingEvent = Envelope<'hitl.pending', HitlPendingPayload>;
 
+/** Mesh bootstrap / Headscale enrollment visibility (Story 5.1). */
+export interface RealmMeshStatePayload {
+  job_id: string;
+  status: string;
+  correlation_id: string;
+  code?: string;
+  message?: string;
+}
+export type RealmMeshStateEvent = Envelope<'realm.mesh.state', RealmMeshStatePayload>;
+
 /** Empty by contract — heartbeat is pure keep-alive. */
 export type HeartbeatEvent = Envelope<'heartbeat', Record<string, never>>;
 
@@ -85,6 +96,7 @@ export type DirijorRealtimeEvent =
   | TopologyDeltaEvent
   | MetricsUpdateEvent
   | HitlPendingEvent
+  | RealmMeshStateEvent
   | HeartbeatEvent
   | SessionByeEvent;
 
