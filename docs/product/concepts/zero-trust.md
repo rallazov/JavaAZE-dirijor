@@ -124,6 +124,9 @@ permissive system — it has to be part of the default posture.
   ready: false, detail: "planned — see Story 5.1"` and `semantic_cache`
   according to Qdrant configuration — the contract stays honest about
   what's wired vs optional.
+- **Anomaly policy probe + quarantine registry** — Story 4.2 (`anomaly_policy`
+  readiness entry; optional `DIRIJOR_ANOMALY_POLICY_PATH`; in-process
+  `GET /safety/quarantine/{realm_id}`).
 - **Mesh bootstrap, OpenClaw wrapper, Firecracker lifecycle** — Stories
   5.1, 5.2, 5.3 in Epic 5 (in progress).
 - **Default-deny egress policy hooks at provision time** — Story 2.3.

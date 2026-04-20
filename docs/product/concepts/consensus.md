@@ -113,10 +113,12 @@ empty until the cache is wired up.
 - **Verified semantic cache** (Story 4.1) augments `POST /consensus` when `query_vector` + scope are supplied and Qdrant is configured; when the cache is off or misses, `verified_facts` stays empty and misses are logged — see the [supervisor API reference](../../reference/supervisor-api.md).
 
 Claims that Dirijor delivers **"zero hallucination on high-stakes outputs"**
-remain **aspirational** until Safety Fortress stories (anomaly/quarantine,
-full audit export, production-grade policy) close the loop beyond consensus +
-cache. The PRD and `/health` contract stay explicit about what is shipped vs
-planned — that honesty is the point of the API reference.
+remain **aspirational** until Safety Fortress closes the remaining loop beyond
+consensus + cache: **immutable audit export** (Story 4.3), broader
+production-grade policy, and runtime hardening. **Anomaly auto-quarantine**
+(JSON policy + supervisor hooks — Story 4.2) is shipped; it does not by itself
+prove the full PRD safety bar. The PRD and `/health` contract stay explicit
+about what is shipped vs planned — that honesty is the point of the API reference.
 
 ## Related reading
 

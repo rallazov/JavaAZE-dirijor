@@ -44,8 +44,8 @@ v0.1 supervisor exposes — no opinions, no recommendations. For the
 | `POST` | `/realms/spin`                | Enqueue a realm provisioning job (Story 2.1 — adapter-backed, async)  | `202` / `400` / `409` / `503` |
 | `GET`  | `/realms/{job_id}`            | Poll spin job state (Story 2.1 — `validating → provisioning → ready \| failed`) | `200` / `404` |
 | `DELETE` | `/realms/{job_id}`          | Request realm destroy (Story 2.2 — adapter-scoped; poll `GET` for completion) | `202` / `204` / `404` / `409` / `500` |
-| `GET`  | `/safety/quarantine/{realm_id}` | List quarantined agents for a realm (Story 4.2 — in-process registry) | `200` / `400` (`SpinError`) |
-| `POST` | `/safety/signal`              | Inject synthetic anomaly signal for tests/demos (Story 4.2 — **off** unless `DIRIJOR_SAFETY_SIGNALS_ENABLED` is truthy) | `204` / `400` / `403` |
+| `GET`  | `/safety/quarantine/{realm_id}` | List quarantined agents for a realm (Story 4.2, shipped — in-process registry) | `200` / `400` (`SpinError`) |
+| `POST` | `/safety/signal`              | Inject synthetic anomaly signal for tests/demos (Story 4.2, shipped — **off** unless `DIRIJOR_SAFETY_SIGNALS_ENABLED` is truthy) | `204` / `400` / `403` |
 | `WS`   | `/ws/realm/{realm_id}`        | Live topology / metrics / HITL events for the Private Realm canvas    | accept `101` / close `4401`, `4403`, `1011` |
 
 The Docker image ships a stdlib `HEALTHCHECK` that calls `GET /health`
@@ -270,7 +270,7 @@ Optional JSON fields on `POST /consensus`:
 | `semantic_scope_id` | `string` | `""` | **Required** (non-blank) whenever `query_vector` is present — realm / tenant isolation boundary; there is no default shared scope. |
 | `semantic_cache_limit` | `int` | `5` | `1`–`20` hits max. |
 | `semantic_cache_threshold` | `float \| null` | `null` | `0.0`–`1.0`; when `null`, the server uses `QDRANT_SCORE_THRESHOLD` (default `0.78`). |
-| `realm_id` | `string \| null` | `null` | When set (same grammar as WebSocket `realm_id`), Story 4.2 may evaluate the loaded anomaly policy after a successful 200 and emit `topology.delta` / `hitl.pending` on quarantine. |
+| `realm_id` | `string \| null` | `null` | When set (same grammar as WebSocket `realm_id`), the supervisor evaluates the loaded anomaly policy after a successful 200 and may emit `topology.delta` / `hitl.pending` on quarantine (Story 4.2). |
 | `anomaly_subject_agent_id` | `string \| null` | `null` | Canvas agent node id to tag when a consensus rule fires; when omitted, the first opinion’s `agent_id` is used, or `"consensus"` when there are no opinions. |
 
 **HTTP 200 — semantic cache outcome (Story 4.1, additive on SCHEMA v2 body).**
@@ -321,7 +321,7 @@ qdrant_unavailable` where applicable.
 
 ---
 
-## Story 4.2 — anomaly policy & quarantine
+## Story 4.2 — anomaly policy & quarantine *(shipped)*
 
 **Configuration.**
 
@@ -353,7 +353,7 @@ Malformed `realm_id` → **400** with `SpinError` (`invalid_realm_id`), same gra
 **204** on success when enabled; **403** when signals are disabled.
 
 **WebSocket (additive).** Quarantine uses existing event types only:
-`topology.delta` may include `agents[]` entries with `status: "quarantined"`
+when policy isolates an agent, `topology.delta` carries `agents[]` entries with `status: "quarantined"`
 plus `label` / `signaturePreview` / `safetyScore` hints; `hitl.pending` carries
 a `CriticalAction`-compatible `action` object (stable `id`, `title`, `detail`,
 `requestedAt`, `safetyScore`).
@@ -685,7 +685,7 @@ Core remains HTTP POST).
 
 - `session.hello` — first frame (`seq == 0`). Payload includes `service_version`, `schema_version`, `supported_event_types`, `heartbeat_interval_s`, and `connection_id` (UUID for this TCP session).
 - `heartbeat` — emitted every `HEARTBEAT_INTERVAL_S` (default **15 s**). Empty payload.
-- `topology.delta` — `payload.agents?: AgentPatch[]`, `payload.edges?: EdgePatch[]`. Each patch carries an `id`; `_tombstone: true` means "remove this id". All other keys are a shallow upsert. Story 4.2 may set agent `status` to `"quarantined"` (and related hints) when policy isolates an agent.
+- `topology.delta` — `payload.agents?: AgentPatch[]`, `payload.edges?: EdgePatch[]`. Each patch carries an `id`; `_tombstone: true` means "remove this id". All other keys are a shallow upsert. Story 4.2 sets agent `status` to `"quarantined"` (and related hints) when policy isolates an agent.
 - `metrics.update` — `payload` is a partial of the canvas `RealmMetrics` shape. Shallow-merged into the store.
 - `hitl.pending` — `payload.action` is a full `CriticalAction`; dedup by `action.id`.
 - `session.bye` — reserved for a future **server-initiated** graceful shutdown (operator drain, deploy, etc.). v0.1 does not emit it; sessions end with client close or server `1011` / process teardown.

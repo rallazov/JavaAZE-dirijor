@@ -91,9 +91,10 @@ When any page contradicts this list, the PRD wins. File a docs PR.
 
 - **Supervisor HTTP contract** hardened (Story 3.1) — see [Supervisor API reference](reference/supervisor-api.md).
 - **Consensus** — real LangGraph debate loop with configurable rounds and quorum (Story 3.2); optional Qdrant-backed **verified semantic cache** on `POST /consensus` when configured (Story 4.1).
+- **Anomaly policy & auto-quarantine** — JSON ruleset, `GET /safety/quarantine/{realm_id}`, gated `POST /safety/signal`, post-consensus hooks + canvas `topology.delta` / `hitl.pending` (Story 4.2, shipped).
 - **Canvas ↔ Core WebSocket** — `WS /ws/realm/{realm_id}` with a six-key envelope; v0.1 uses a stub `_authorize_realm` until mesh identity (Story 5.1). Canvas connects when `NEXT_PUBLIC_DIRIJOR_WS_URL` is set.
 - **Canvas shell** operational through Story 1.6 (a11y MVP done).
 - **Realm provisioning** — async spin + poll + destroy path with Terraform adapter and default-deny egress hooks (Epic 2, Stories 2.1–2.3).
-- **Mesh** remains planned in the readiness contract (Story 5.1). **Safety Fortress** anomaly/quarantine and audit export are Epic 4 follow-ons.
+- **Mesh** remains planned in the readiness contract (Story 5.1). **Safety Fortress** immutable **audit export** (Story 4.3) is the remaining Epic 4 follow-on; anomaly auto-quarantine shipped in Story 4.2.
 
 The [reference](reference/supervisor-api.md) page is always the truth about what's running *today*.

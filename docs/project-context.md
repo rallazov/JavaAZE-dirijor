@@ -11,7 +11,7 @@ Private Agent Network OS: zero-trust realms, canvas-driven topology, Dirijor Cor
 ## Repository layout (high level)
 
 - `docs/` — PRD, architecture (Mermaid), this file
-- `backend/dirijor-core/` — FastAPI + LangGraph supervisor (v0.1; real consensus loop + optional semantic cache; see `docs/reference/supervisor-api.md`)
+- `backend/dirijor-core/` — FastAPI + LangGraph supervisor (v0.1; real consensus loop + optional semantic cache + Story 4.2 anomaly/quarantine hooks; see `docs/reference/supervisor-api.md`)
 - `backend/openclaw-wrapper/` — agent runtime wrapper
 - Terraform / docker-compose at repo root for early provisioning
 - `_bmad/` — BMAD BMM skills and workflows (version in `_bmad/_config/manifest.yaml`)

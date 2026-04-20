@@ -42,9 +42,10 @@ preserved). Story 3.3 added a WebSocket channel for live canvas updates and
 bumped `schema_version` from 2 → 3 (additive — all v2 keys preserved; `GET /`
 gains a `realtime` block and `GET /health` gains a `realtime_channel`
 dependency). Story 4.1 adds verified semantic cache HTTP surfaces and bumps
-`schema_version` to **5**. Story 4.2 adds optional anomaly policy + quarantine
-HTTP surfaces (`GET /safety/quarantine/...`, gated `POST /safety/signal`) and
-bumps `schema_version` to **6** (additive — all prior keys preserved).
+`schema_version` to **5**. Story **4.2** shipped optional anomaly policy +
+quarantine HTTP surfaces (`GET /safety/quarantine/...`, gated
+`POST /safety/signal`) and bumped `schema_version` to **6** (additive — all
+prior keys preserved).
 
 - `GET /` — service identity + aggregate status + per-dependency readiness.
 - `GET /health` — same dependency map, `timestamp`, and HTTP **200** when every
@@ -226,7 +227,7 @@ as `/consensus` and `/ws`: closed `SpinError.code` enum, `ConfigDict(extra="forb
 on every Pydantic model, additive-only response shapes. Story 2.2 bumped
 `SCHEMA_VERSION` to `4` (destroy route + SpinError extensions); Story 4.1
 bumped it to `5` (semantic-cache endpoints + consensus cache fields); Story
-4.2 bumps it to `6` (Safety Fortress quarantine list + signal hook + optional
+4.2 bumped it to `6` (Safety Fortress quarantine list + signal hook + optional
 consensus `realm_id`) — see
 [`docs/reference/supervisor-api.md`](docs/reference/supervisor-api.md).
 

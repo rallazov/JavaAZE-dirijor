@@ -91,8 +91,8 @@ and [Concept — Consensus](../product/concepts/consensus.md).
   optional consensus augmentation via `query_vector` / `semantic_scope_id`,
   live `semantic_cache` readiness probe (`required: false`; unconfigured URL
   → `ready: false, detail: "not configured"`).
-- Anomaly auto-quarantine (**Story 4.2**): versioned JSON policy
-  (`DIRIJOR_ANOMALY_POLICY_PATH`), post-consensus + optional `POST /safety/signal`
+- Anomaly auto-quarantine: **shipped** (**Story 4.2**) — versioned JSON policy
+  (`DIRIJOR_ANOMALY_POLICY_PATH`), post-consensus + optional gated `POST /safety/signal`
   evaluation, in-process per-realm registry, `GET /safety/quarantine/{realm_id}`,
   canvas notifications via existing `topology.delta` / `hitl.pending` types.
 - Audit export package: **Story 4.3** (backlog).

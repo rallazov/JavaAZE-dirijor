@@ -5,7 +5,7 @@ Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
 # Tutorial — Your first local Dirijor environment
 
 > **Last verified:** 2026-04-19, against `docs/reference/supervisor-api.md`
-> (`schema_version` **5** on `GET /` as of Story 4.1). Re-run the curl +
+> (`schema_version` **6** on `GET /` after Story 4.2). Re-run the curl +
 > pytest steps after any `SCHEMA_VERSION` bump.
 
 **Time:** 10–15 minutes.
@@ -18,7 +18,7 @@ Node 18+, Python 3.12+, and git.
 
 Dirijor's end-state is a one-click private realm on the cloud of your
 choice. **v0.1 is not there yet** — mesh bootstrap and full Safety
-Fortress automation are still growing (Stories 5.1+, 4.2+). What *is*
+Fortress automation are still growing (Stories 4.3, 5.1+). What *is*
 there locally is the **supervisor** (HTTP + WebSocket + consensus +
 optional semantic cache + realm spin/destroy), and the **Network Canvas**
 UI. Running both together is the fastest way to:
@@ -33,7 +33,7 @@ UI. Running both together is the fastest way to:
 - The supervisor running on `http://localhost:8000`, serving the
   contract in [Supervisor API reference](../../reference/supervisor-api.md)
   (including `POST /consensus`, realm spin/destroy, optional semantic-cache
-  endpoints, and `WS /ws/realm/{realm_id}`).
+  and safety/quarantine endpoints, and `WS /ws/realm/{realm_id}`).
 - The canvas UI running on `http://localhost:3000`, redirecting to
   `/canvas`.
 - A terminal window where you can `curl` the supervisor and watch the
@@ -95,7 +95,7 @@ You should see a response whose shape matches this (values will differ):
 {
   "service": "dirijor-supervisor",
   "version": "0.1.0",
-  "schema_version": 5,
+  "schema_version": 6,
   "status": "operational",
   "consensus_engine": "ready",
   "uptime_s": 4.8,
@@ -105,19 +105,20 @@ You should see a response whose shape matches this (values will differ):
     "realtime_channel":  { "ready": true,  "required": true,  "detail": null },
     "realm_manager":     { "ready": true,  "required": true,  "detail": null },
     "semantic_cache":    { "ready": false, "required": false, "detail": "not configured" },
+    "anomaly_policy":    { "ready": true,  "required": false, "detail": null },
     "mesh":              { "ready": false, "required": false, "detail": "planned — see Story 5.1" }
   },
   "realtime": {
     "connections": 0,
     "heartbeat_interval_s": 15.0,
-    "schema_version": 5
+    "schema_version": 6
   }
 }
 ```
 
 !!! tip "What to notice"
-    Optional subsystems (`semantic_cache`, `mesh`) stay `required: false`
-    so local dev works without Qdrant or mesh. `semantic_cache.detail`
+    Optional subsystems (`semantic_cache`, `anomaly_policy`, `mesh`) stay `required: false`
+    so local dev works without Qdrant, a policy file, or mesh. `semantic_cache.detail`
     reads **`not configured`** until `QDRANT_URL` (and friends) are set —
     see the API reference. `realtime.connections` counts open WebSocket
     sessions (in-process; zero with no canvas clients).
@@ -279,4 +280,4 @@ operate / tear down — over real IaC adapters.
 - **Understand the contract you just exercised:** [Supervisor API reference](../../reference/supervisor-api.md).
 - **Understand the concepts you just saw:** [Realms](../../product/concepts/realms.md), [Consensus](../../product/concepts/consensus.md), [Zero-trust by default](../../product/concepts/zero-trust.md).
 - **Understand the bigger picture:** [Architecture overview](../../architecture/overview.md) + [why the supervisor is built on LangGraph (ADR-0001)](../../architecture/adr/0001-langgraph-supervisor.md).
-- **Plan forward:** the epics + stories planning artifact at `_bmad-output/planning-artifacts/epics.md` (in the repo) tracks Epic 3 (done through 3.3), Epic 2 (spin + terraform + egress through 2.3), and active Safety Fortress / mesh work (Epic 4–6).
+- **Plan forward:** the epics + stories planning artifact at `_bmad-output/planning-artifacts/epics.md` (in the repo) tracks Epic 3 (done through 3.3), Epic 2 (spin + terraform + egress through 2.3), Safety Fortress on Epic 4 (Story 4.2 anomaly/quarantine shipped), and mesh / observability work (Epic 5–6).
