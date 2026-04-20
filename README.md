@@ -45,7 +45,8 @@ dependency). Story 4.1 adds verified semantic cache HTTP surfaces and bumps
 `schema_version` to **5**. Story **4.2** shipped optional anomaly policy +
 quarantine HTTP surfaces (`GET /safety/quarantine/...`, gated
 `POST /safety/signal`) and bumped `schema_version` to **6** (additive — all
-prior keys preserved).
+prior keys preserved). Story **4.3** adds gated **`POST /audit/export`**
+(immutable audit ZIP bundles) and bumps `schema_version` to **7**.
 
 - `GET /` — service identity + aggregate status + per-dependency readiness.
 - `GET /health` — same dependency map, `timestamp`, and HTTP **200** when every
@@ -63,7 +64,7 @@ prior keys preserved).
 {
   "service": "dirijor-supervisor",
   "version": "0.1.0",
-  "schema_version": 6,
+  "schema_version": 7,
   "status": "operational",
   "consensus_engine": "ready",
   "uptime_s": 12.4,
@@ -79,7 +80,7 @@ prior keys preserved).
   "realtime": {
     "connections": 0,
     "heartbeat_interval_s": 15.0,
-    "schema_version": 6
+    "schema_version": 7
   }
 }
 ```
@@ -90,7 +91,7 @@ prior keys preserved).
 {
   "status": "ok",
   "version": "0.1.0",
-  "schema_version": 6,
+  "schema_version": 7,
   "uptime_s": 12.4,
   "timestamp": "2026-04-16T10:12:44.117Z",
   "checks": {

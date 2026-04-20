@@ -95,7 +95,7 @@ and [Concept — Consensus](../product/concepts/consensus.md).
   (`DIRIJOR_ANOMALY_POLICY_PATH`), post-consensus + optional gated `POST /safety/signal`
   evaluation, in-process per-realm registry, `GET /safety/quarantine/{realm_id}`,
   canvas notifications via existing `topology.delta` / `hitl.pending` types.
-- Audit export package: **Story 4.3** (backlog).
+- Audit export package: **Story 4.3** *(shipped — gated `POST /audit/export`)*.
 
 ---
 

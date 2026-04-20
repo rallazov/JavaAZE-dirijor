@@ -30,7 +30,7 @@ v0.1 supervisor exposes — no opinions, no recommendations. For the
 | Field | Value | Meaning |
 |---|---|---|
 | `SERVICE_VERSION` | `"0.1.0"` | Module constant; `FastAPI(version=...)` and every response read this. |
-| `SCHEMA_VERSION` | `6` | Contract shape version. Story 4.2 bumped 5→6: optional `realm_id` / `anomaly_subject_agent_id` on `POST /consensus`; `GET /safety/quarantine/{realm_id}`; gated `POST /safety/signal`; optional `anomaly_policy` readiness entry; WebSocket payloads remain existing `topology.delta` / `hitl.pending` types (additive agent fields such as `status: "quarantined"`). Story 4.1 bumped 4→5: semantic-cache HTTP + consensus cache fields + `semantic_cache` probe. Story 2.2 bumped 3→4 (`DELETE /realms/{job_id}` + destroy-related `outputs` keys + nine new `SpinError.code` values). Story 3.2 bumped 1→2 (debate loop), Story 3.3 bumped 2→3 (WebSocket channel + `realtime` block). Story 2.1 added the `realm_manager` readiness-registry dep without bumping — precedent for "dep-only additive" extensions. Story 2.3 added **`egress_policy_denied`** and Terraform egress controls **without** bumping `SCHEMA_VERSION` (env- and module-driven only). |
+| `SCHEMA_VERSION` | `7` | Contract shape version. Story 4.3 bumped 6→7: gated `POST /audit/export` (ZIP audit bundle); realm-scoped in-memory audit ring; new `SpinError` codes `audit_export_disabled`, `audit_export_too_large`, `audit_export_invalid_window`. Story 4.2 bumped 5→6: optional `realm_id` / `anomaly_subject_agent_id` on `POST /consensus`; `GET /safety/quarantine/{realm_id}`; gated `POST /safety/signal`; optional `anomaly_policy` readiness entry; WebSocket payloads remain existing `topology.delta` / `hitl.pending` types (additive agent fields such as `status: "quarantined"`). Story 4.1 bumped 4→5: semantic-cache HTTP + consensus cache fields + `semantic_cache` probe. Story 2.2 bumped 3→4 (`DELETE /realms/{job_id}` + destroy-related `outputs` keys + nine new `SpinError.code` values). Story 3.2 bumped 1→2 (debate loop), Story 3.3 bumped 2→3 (WebSocket channel + `realtime` block). Story 2.1 added the `realm_manager` readiness-registry dep without bumping — precedent for "dep-only additive" extensions. Story 2.3 added **`egress_policy_denied`** and Terraform egress controls **without** bumping `SCHEMA_VERSION` (env- and module-driven only). |
 
 ## Endpoints at a glance
 
@@ -46,6 +46,7 @@ v0.1 supervisor exposes — no opinions, no recommendations. For the
 | `DELETE` | `/realms/{job_id}`          | Request realm destroy (Story 2.2 — adapter-scoped; poll `GET` for completion) | `202` / `204` / `404` / `409` / `500` |
 | `GET`  | `/safety/quarantine/{realm_id}` | List quarantined agents for a realm (Story 4.2, shipped — in-process registry) | `200` / `400` (`SpinError`) |
 | `POST` | `/safety/signal`              | Inject synthetic anomaly signal for tests/demos (Story 4.2, shipped — **off** unless `DIRIJOR_SAFETY_SIGNALS_ENABLED` is truthy) | `204` / `400` / `403` |
+| `POST` | `/audit/export`               | Download ZIP audit bundle for a realm + UTC half-open window (Story 4.3 — **off** unless `DIRIJOR_AUDIT_EXPORT_ENABLED` is truthy) | `200` (`application/zip`) / `400` / `403` / `413` (`SpinError`) |
 | `WS`   | `/ws/realm/{realm_id}`        | Live topology / metrics / HITL events for the Private Realm canvas    | accept `101` / close `4401`, `4403`, `1011` |
 
 The Docker image ships a stdlib `HEALTHCHECK` that calls `GET /health`
@@ -98,7 +99,7 @@ Pydantic model: `RootStatus`.
 {
   "service": "dirijor-supervisor",
   "version": "0.1.0",
-  "schema_version": 6,
+  "schema_version": 7,
   "status": "operational",
   "consensus_engine": "ready",
   "uptime_s": 12.4,
@@ -114,7 +115,7 @@ Pydantic model: `RootStatus`.
   "realtime": {
     "connections": 0,
     "heartbeat_interval_s": 15.0,
-    "schema_version": 6
+    "schema_version": 7
   }
 }
 ```
@@ -148,7 +149,7 @@ Pydantic model: `HealthStatus`.
 {
   "status": "ok",
   "version": "0.1.0",
-  "schema_version": 6,
+  "schema_version": 7,
   "uptime_s": 12.4,
   "timestamp": "2026-04-16T10:12:44.117Z",
   "checks": {
@@ -174,7 +175,7 @@ status code and `status` field differ.
 {
   "status": "degraded",
   "version": "0.1.0",
-  "schema_version": 6,
+  "schema_version": 7,
   "uptime_s": 342.0,
   "timestamp": "2026-04-16T10:18:02.554Z",
   "checks": {
@@ -292,6 +293,11 @@ Optional JSON fields on `POST /consensus`:
   over the `WS /ws/realm/{realm_id}` channel in a future story; the
   Story 3.3 channel only carries `topology.delta`, `metrics.update`, and
   `hitl.pending` today.
+- **Realm-scoped auditing (Story 4.3):** `consensus.completed` audit rows are
+  appended only when `realm_id` is present on the request and `POST /consensus`
+  returns **200**. Consensus calls **without** `realm_id` do not appear in
+  per-realm export bundles — auditors must not assume global consensus coverage
+  from `POST /audit/export` alone.
 
 ---
 
@@ -365,6 +371,108 @@ a `CriticalAction`-compatible `action` object (stable `id`, `title`, `detail`,
 **Registry caveat.** Quarantine state is in-memory per process (same as
 `_SPIN_JOBS`); multi-worker deployments see partitioned state until a shared
 store lands.
+
+---
+
+## Story 4.3 — immutable audit export package *(shipped)*
+
+**Purpose (NFR3).** Operators download a single **ZIP** file (no extra tooling
+beyond unzip) that auditors can integrity-check offline. v0 is **HTTP-only**
+(no WebSocket progress).
+
+**Access control (v0).** There is **no** API key or mTLS in this story. Export
+is **disabled by default**: set **`DIRIJOR_AUDIT_EXPORT_ENABLED`** to a truthy
+value using the **same** convention as **`DIRIJOR_SAFETY_SIGNALS_ENABLED`**
+(`1`, `true`, `yes`). When disabled, **`POST /audit/export`** returns **403**
+with `SpinError` `code: "audit_export_disabled"` and a `message` naming the
+env var. **Assume a private bind / network posture** until a future story adds
+authentication.
+
+**Half-open UTC window.** Request JSON:
+
+```json
+{
+  "realm_id": "demo-realm",
+  "window_start": "2026-04-19T00:00:00Z",
+  "window_end": "2026-04-20T00:00:00Z"
+}
+```
+
+Both instants **must** be ISO-8601 **UTC** with a **`Z`** suffix (same rule in
+OpenAPI validation and tests). Events are included iff **`window_start <= t <
+window_end`** (end is **exclusive**). `manifest.json` carries
+`"window_semantics": "half_open_utc"` so bundles are self-describing.
+
+**Response — `200`:** `Content-Type: application/zip` and
+`Content-Disposition: attachment; filename="dirijor-audit-<realm>-<export_id>.zip"`.
+
+**Archive layout (minimum):**
+
+| Member | Role |
+|---|---|
+| `manifest.json` | `export_id` (UUID), `realm_id`, window bounds, `created_at`, `supervisor_version`, `schema_version`, `manifest_schema` (`dirijor.audit_export.v1`), `files[]` with `path`, `sha256`, `bytes` for every other member, `tamper_evidence` (explicit stub: `algorithm: "none"` + human `note` — digests are integrity-only, not authenticity). |
+| `events.jsonl` | Zero or more lines; each line is one JSON audit row (`type` is `consensus.completed` or `safety.quarantine`). Sorted by `ts` ascending then `event_id`. |
+| `quarantine_snapshot.json` | `{ "items": [ ... ] }` using the same row shape as `GET /safety/quarantine/{realm_id}` (`realm_id`, `agent_id`, `rule_id`, `quarantined_at`, `evidence`) — **current** registry at export time (may be `[]`). |
+
+**Ring buffer.** Events are stored in a **per-realm in-memory** ring (default
+cap **`DIRIJOR_AUDIT_RING_MAX=5000`**). Overflow **drops the oldest** event and
+emits a structured log (`event="audit.ring_evicted"`). **State is lost on
+restart** — exports are best-effort compliance aids, not a durable SOX system
+until a shared store exists (same multi-worker caveat as quarantine / spin
+jobs).
+
+**Event types (v0).**
+
+- `consensus.completed` — non-secret summary: `decision`, `consensus_score`,
+  `termination_reason`, `rounds`, `threshold`, vote/message **counts** only
+  (no full `messages` / vote bodies).
+- `safety.quarantine` — **at most one** row per logical key
+  `(realm_id, agent_id, rule_id)`; idempotent registry updates do **not**
+  append duplicate rows.
+
+**Limits & errors.**
+
+- **`DIRIJOR_AUDIT_EXPORT_MAX_WINDOW_HOURS`** (default **168**) — max span of
+  `[window_start, window_end)`; wider windows → **400**
+  `audit_export_invalid_window`.
+- **`DIRIJOR_AUDIT_EXPORT_MAX_UNCOMPRESSED_BYTES`** (default **20971520**) —
+  estimated uncompressed payload (member JSON before ZIP) over the limit →
+  **413** `audit_export_too_large`.
+- Malformed `realm_id` / bad timestamps / inverted window → **400**
+  `audit_export_invalid_window` (`SpinError`).
+
+**Example download:**
+
+```bash
+export DIRIJOR_AUDIT_EXPORT_ENABLED=1
+curl -sS -X POST http://127.0.0.1:8000/audit/export \
+  -H 'Content-Type: application/json' \
+  -d '{"realm_id":"demo-a","window_start":"2026-04-19T00:00:00Z","window_end":"2026-04-20T00:00:00Z"}' \
+  -o audit-bundle.zip
+unzip -l audit-bundle.zip
+# Recompute e.g. sha256 of events.jsonl and compare to manifest.json → files[]
+```
+
+**Manifest fragment (`files` + `tamper_evidence`):**
+
+```json
+"files": [
+  {
+    "path": "events.jsonl",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0
+  },
+  {
+    "path": "quarantine_snapshot.json",
+    "sha256": "8f4343466480886c1130e4b4ef32e3f8f4d0e8c8b8c8b8c8b8c8b8c8b8c8b8c8",
+    "bytes": 14
+  }
+],
+"tamper_evidence": {
+  "algorithm": "none",
+  "note": "No cryptographic signature is attached to this bundle. SHA-256 entries in `files` are content digests for integrity checking only, not authenticity. Use network posture (private bind) until a future story adds signing."
+}
+```
 
 ---
 
@@ -461,6 +569,9 @@ additive change and requires updating this page in the same PR.
 | `egress_policy_denied`       | _on job surface_ | Pre-provision egress policy hook denied the spin (`validate` / `provision` only — not `destroy`). `details.reason` (e.g. `policy_hook`), `details.policy_id` (e.g. `egress-default-v0`), `details.adapter`. **`DIRIJOR_EGRESS_POLICY_DENY`** is recognized only when the value trims to exactly **`1`** (unlike **`DIRIJOR_ALLOW_PUBLIC_EGRESS`**, which treats `1` / `true` / `yes` / `on` as truthy). |
 | `destroy_invalid_state`      | `409` | `DELETE` when `phase != "ready"`. `details.current_phase`. |
 | `destroy_already_requested`  | `409` | Second `DELETE` while destroy is in flight. `details.destroy_requested_at`. |
+| `audit_export_disabled`      | `403` | `POST /audit/export` when `DIRIJOR_AUDIT_EXPORT_ENABLED` is not truthy. `details.env` names the variable. |
+| `audit_export_too_large`     | `413` | Estimated uncompressed export exceeds `DIRIJOR_AUDIT_EXPORT_MAX_UNCOMPRESSED_BYTES`. `details.limit_bytes`, `details.estimated_bytes`. |
+| `audit_export_invalid_window`| `400` | Bad UTC `Z` timestamps, inverted window, span over `DIRIJOR_AUDIT_EXPORT_MAX_WINDOW_HOURS`, or Pydantic validation on the export body. |
 
 ### Adapter: `terraform-digitalocean`
 
@@ -543,7 +654,7 @@ Pydantic model: `SpinJob`.
     "agent_count":   3
   },
   "error":          null,
-  "schema_version": 6
+  "schema_version": 7
 }
 ```
 
@@ -664,7 +775,7 @@ Core remains HTTP POST).
 ```json
 {
   "type": "topology.delta",
-  "schema_version": 6,
+  "schema_version": 7,
   "realm_id": "demo",
   "ts": "2026-04-16T10:12:44.117Z",
   "seq": 3,
@@ -752,8 +863,9 @@ Tests cover:
 - `test_health_ok_when_ready`, `test_health_503_when_required_dep_degraded`, `test_health_never_500s_when_probe_raises`, `test_health_includes_realtime_channel_dep`
 - `test_registry_contains_required_dependencies`
 - `test_consensus_smoke`, `test_consensus_degraded_keeps_v01_key_set`
-- `test_schema_version_pinned`, `test_schema_version_is_6` (fail loudly if someone bumps `SCHEMA_VERSION` without updating this page)
+- `test_schema_version_pinned`, `test_schema_version_is_7` (fail loudly if someone bumps `SCHEMA_VERSION` without updating this page)
 - Story 4.2 safety suite: `test_safety_quarantine.py` (policy load, consensus + signal hooks, HTTP list, realm isolation, `broadcast_event` unknown-type regression)
+- Story 4.3 audit export: `test_audit_export.py` (export gate, half-open filtering, 413 oversize, manifest digests, quarantine audit idempotency, ring eviction log)
 - Story 3.3 WebSocket suite: `test_ws_accepts_valid_realm_id`, `test_ws_rejects_missing_realm_id`, `test_ws_rejects_malformed_realm_id`, `test_ws_rejects_forbidden_realm`, `test_ws_broadcast_reaches_only_matching_realm`, `test_ws_heartbeat_emitted_on_idle`, `test_ws_disconnect_cleans_up_registry`, `test_ws_close_1011_on_send_failure`
 - Story 2.1 realm-spin suite: `test_spin_accepts_valid_request_returns_202`, `test_spin_echoes_caller_provided_realm_id`, `test_spin_generates_realm_id_when_absent`, `test_spin_rejects_empty_description`, `test_spin_rejects_oversized_description`, `test_spin_rejects_invalid_realm_id`, `test_spin_rejects_unknown_adapter`, `test_spin_rejects_conflict_on_active_realm`, `test_spin_job_progresses_through_lifecycle`, `test_spin_failure_surfaces_structured_error`, `test_get_realm_job_404_on_unknown_id`, `test_health_includes_realm_manager_dep`
 - Story 2.2 terraform + destroy suite (20 cases): `test_terraform_adapter_registered_when_token_and_binary_present`, `test_terraform_adapter_skipped_when_token_absent`, `test_terraform_adapter_skipped_when_binary_missing`, `test_spin_terraform_adapter_accepts_and_returns_202`, `test_spin_terraform_lifecycle_progresses_to_ready`, `test_spin_terraform_invokes_commands_in_order`, `test_spin_terraform_init_failure_surfaces_terraform_init_failed`, `test_spin_terraform_validate_failure_surfaces_terraform_validate_failed`, `test_spin_terraform_plan_failure_surfaces_terraform_plan_failed`, `test_spin_terraform_apply_failure_surfaces_terraform_apply_failed`, `test_spin_terraform_apply_failure_scrubs_do_pat_tokens`, `test_spin_terraform_command_timeout_surfaces_terraform_command_timeout`, `test_spin_terraform_credentials_missing_at_validate_time_surfaces_adapter_credentials_missing`, `test_destroy_on_ready_job_returns_202_and_runs_terraform_destroy`, `test_destroy_on_non_ready_job_returns_409_destroy_invalid_state`, `test_destroy_idempotent_on_already_destroyed_returns_204`, `test_delete_realm_job_404_on_unknown_id`, `test_schema_version_is_4`, `test_scrub_secrets_masks_all_documented_patterns`, `test_local_noop_destroy_is_idempotent_noop`

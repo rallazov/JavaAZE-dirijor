@@ -63,7 +63,7 @@ import time
 import traceback
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Protocol, Self, Sequence, TypedDict, get_args
 
@@ -84,6 +84,7 @@ from qdrant_client.models import (
     VectorParams,
 )
 
+import audit_export as audit_export_lib
 from safety_policy import (
     AnomalyPolicyDocument,
     load_anomaly_policy_from_path,
@@ -125,7 +126,11 @@ SERVICE_VERSION = "0.1.0"
 #     `anomaly_policy` readiness entry (required: false; invalid policy file
 #     degrades this probe only). WebSocket payloads remain existing
 #     `topology.delta` / `hitl.pending` types with additive agent fields.
-SCHEMA_VERSION = 6
+#   v7 (Story 4.3, 2026-04-19) — Immutable audit export: gated
+#     `POST /audit/export` (ZIP bundle); realm-scoped in-memory audit ring;
+#     new `SpinError` codes `audit_export_disabled`, `audit_export_too_large`,
+#     `audit_export_invalid_window`.
+SCHEMA_VERSION = 7
 STARTED_AT = time.monotonic()
 STARTUP_GRACE_S = 1.0
 
@@ -1368,6 +1373,42 @@ class SafetySignalRequest(BaseModel):
     evidence: dict[str, Any] = Field(default_factory=dict)
 
 
+class AuditExportRequest(BaseModel):
+    """`POST /audit/export` body — UTC half-open window ``[window_start, window_end)``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    realm_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
+    window_start: str
+    window_end: str
+
+    @field_validator("window_start", "window_end")
+    @classmethod
+    def _audit_window_utc_z(cls, v: str) -> str:
+        s = str(v).strip()
+        try:
+            audit_export_lib.parse_utc_iso_z(s)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        return s
+
+    @model_validator(mode="after")
+    def _audit_window_half_open_and_span(self) -> Self:
+        ws = audit_export_lib.parse_utc_iso_z(self.window_start)
+        we = audit_export_lib.parse_utc_iso_z(self.window_end)
+        if we <= ws:
+            raise ValueError(
+                "window_end must be strictly after window_start "
+                "(half-open interval [window_start, window_end) in UTC)"
+            )
+        max_h = audit_export_lib.export_max_window_hours()
+        if (we - ws) > timedelta(hours=max_h):
+            raise ValueError(
+                f"window span exceeds DIRIJOR_AUDIT_EXPORT_MAX_WINDOW_HOURS={max_h}"
+            )
+        return self
+
+
 async def _record_quarantine_and_broadcast(
     *,
     realm_id: str,
@@ -1384,6 +1425,7 @@ async def _record_quarantine_and_broadcast(
     key = (realm_id, agent_id, rule_id)
     now_mono = time.monotonic()
     emit_ws: bool
+    new_record: QuarantineRecord | None = None
     async with _QUARANTINE_LOCK:
         prev = _QUARANTINE_DEDUPE_LAST.get(key)
         emit_ws = prev is None or (now_mono - prev) >= QUARANTINE_DEDUPE_WINDOW_S
@@ -1399,12 +1441,26 @@ async def _record_quarantine_and_broadcast(
             if emit_ws
             else (existing.quarantined_at if existing else now_wall)
         )
-        bucket[rec_key] = QuarantineRecord(
+        rec = QuarantineRecord(
             realm_id=realm_id,
             agent_id=agent_id,
             rule_id=rule_id,
             quarantined_at=quarantined_at,
             evidence=merged_evidence,
+        )
+        bucket[rec_key] = rec
+        if existing is None:
+            new_record = rec
+
+    if new_record is not None:
+        await audit_export_lib.append_quarantine_new(
+            realm_id,
+            audit_export_lib.SafetyQuarantineAuditPayload(
+                agent_id=new_record.agent_id,
+                rule_id=new_record.rule_id,
+                quarantined_at=new_record.quarantined_at,
+                evidence=dict(new_record.evidence),
+            ),
         )
 
     if not emit_ws:
@@ -1644,6 +1700,20 @@ async def run_consensus(
         },
     )
 
+    if req.realm_id:
+        await audit_export_lib.append_consensus_completed(
+            req.realm_id,
+            audit_export_lib.ConsensusCompletedAuditPayload(
+                decision=payload.decision,
+                consensus_score=payload.consensus_score,
+                termination_reason=payload.termination_reason,
+                rounds=payload.rounds,
+                threshold=payload.threshold,
+                vote_count=len(payload.votes),
+                message_count=len(payload.messages),
+            ),
+        )
+
     await _run_anomaly_after_consensus(req, payload, opinions)
 
     return payload
@@ -1709,6 +1779,9 @@ SpinErrorCode = Literal[
     "destroy_invalid_state",
     "destroy_already_requested",
     "egress_policy_denied",
+    "audit_export_disabled",
+    "audit_export_too_large",
+    "audit_export_invalid_window",
 ]
 _SPIN_ERROR_CODES: tuple[str, ...] = get_args(SpinErrorCode)
 
@@ -2900,6 +2973,85 @@ async def list_quarantined_agents(realm_id: str) -> QuarantineListResponse | JSO
 
 
 @app.post(
+    "/audit/export",
+    response_model=None,
+    responses={
+        400: {"model": SpinError},
+        403: {"model": SpinError},
+        413: {"model": SpinError},
+    },
+)
+async def export_audit_package(req: AuditExportRequest) -> Response | JSONResponse:
+    """Download a ZIP audit bundle for a realm and UTC half-open time window.
+
+    Disabled unless ``DIRIJOR_AUDIT_EXPORT_ENABLED`` matches the same truthiness
+    convention as ``DIRIJOR_SAFETY_SIGNALS_ENABLED`` (``1`` / ``true`` /
+    ``yes``). v0 assumes a private network posture — see ``supervisor-api.md``.
+    """
+    if not audit_export_lib.audit_export_enabled():
+        return _spin_error_response(
+            403,
+            "audit_export_disabled",
+            "POST /audit/export is disabled; set DIRIJOR_AUDIT_EXPORT_ENABLED=1 to enable",
+            {"env": "DIRIJOR_AUDIT_EXPORT_ENABLED"},
+        )
+
+    ws = audit_export_lib.parse_utc_iso_z(req.window_start)
+    we = audit_export_lib.parse_utc_iso_z(req.window_end)
+    events = await audit_export_lib.filtered_events(req.realm_id, ws, we)
+
+    async with _QUARANTINE_LOCK:
+        bucket = _QUARANTINE_BY_REALM.get(req.realm_id, {})
+        q_items = [
+            {
+                "realm_id": rec.realm_id,
+                "agent_id": rec.agent_id,
+                "rule_id": rec.rule_id,
+                "quarantined_at": rec.quarantined_at,
+                "evidence": rec.evidence,
+            }
+            for rec in bucket.values()
+        ]
+
+    export_id = str(uuid.uuid4())
+    try:
+        body = audit_export_lib.build_audit_zip(
+            export_id=export_id,
+            realm_id=req.realm_id,
+            window_start=req.window_start.strip(),
+            window_end=req.window_end.strip(),
+            window_semantics="half_open_utc",
+            events=events,
+            quarantine_items=q_items,
+            service_version=SERVICE_VERSION,
+            schema_version=SCHEMA_VERSION,
+        )
+    except audit_export_lib.AuditExportTooLarge as exc:
+        return _spin_error_response(
+            413,
+            "audit_export_too_large",
+            (
+                f"estimated uncompressed payload exceeds "
+                f"DIRIJOR_AUDIT_EXPORT_MAX_UNCOMPRESSED_BYTES={exc.limit_bytes}"
+            ),
+            {
+                "limit_bytes": exc.limit_bytes,
+                "estimated_bytes": exc.estimated_bytes,
+            },
+        )
+
+    safe_realm = re.sub(r"[^a-zA-Z0-9_-]+", "_", req.realm_id)[:64]
+    filename = f"dirijor-audit-{safe_realm}-{export_id}.zip"
+    return Response(
+        content=body,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
+
+
+@app.post(
     "/safety/signal",
     responses={
         400: {"model": SpinError},
@@ -3146,6 +3298,7 @@ async def delete_realm_job_route(job_id: str) -> Any:
 # endpoints so the Story 3.2 /consensus surface keeps its default
 # Pydantic 422 body (tests in that block rely on it).
 _SPIN_PATH_PREFIX = "/realms/"
+_AUDIT_EXPORT_PATH = "/audit/export"
 
 # Pydantic v2 error `type` values that map to the closed
 # `invalid_realm_id` code when they fire on the `realm_id` field.
@@ -3202,6 +3355,32 @@ async def _spin_validation_exception_handler(
       - malformed `realm_id` (pattern/length)
         → `code="invalid_realm_id"`
     """
+    if request.url.path == _AUDIT_EXPORT_PATH:
+        errors = list(exc.errors())
+        first_msg = (
+            errors[0].get("msg", "invalid audit export request")
+            if errors
+            else "invalid audit export request"
+        )
+        details = {
+            "errors": jsonable_encoder(
+                [
+                    {
+                        "loc": list(e.get("loc", ())),
+                        "type": e.get("type", ""),
+                        "msg": e.get("msg", ""),
+                    }
+                    for e in errors
+                ]
+            )
+        }
+        return _spin_error_response(
+            400,
+            "audit_export_invalid_window",
+            str(first_msg),
+            details,
+        )
+
     if not request.url.path.startswith(_SPIN_PATH_PREFIX):
         # Preserve FastAPI's default for non-spin endpoints.
         return JSONResponse(
