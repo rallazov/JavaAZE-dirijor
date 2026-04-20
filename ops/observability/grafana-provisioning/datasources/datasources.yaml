@@ -1,0 +1,14 @@
+# Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
+apiVersion: 1
+datasources:
+  - name: Tempo
+    type: tempo
+    uid: tempo
+    access: proxy
+    url: http://tempo:3200
+    isDefault: true
+    editable: true
+    jsonData:
+      httpMethod: GET
+      nodeGraph:
+        enabled: true

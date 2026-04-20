@@ -96,6 +96,7 @@ nav:
       - Supervisor HTTP API (v0.1): reference/supervisor-api.md
   - Architecture:
       - Overview: architecture/overview.md
+      - Observability (Grafana): observability/README.md
       - Decision Records:
           - Index: architecture/adr/README.md
           - "ADR-0001: LangGraph supervisor": architecture/adr/0001-langgraph-supervisor.md

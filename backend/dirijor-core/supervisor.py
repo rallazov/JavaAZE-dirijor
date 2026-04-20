@@ -1504,6 +1504,13 @@ async def _record_quarantine_and_broadcast(
             ),
         )
 
+    if emit_ws:
+        # Story 6.2 — notify-path span only (emit_ws); correlates with operator-visible activity (AC4 / review 1A).
+        with _OTEL.start_as_current_span("dirijor.safety.quarantine_record") as _qsp:
+            _qsp.set_attribute("dirijor.realm_id", realm_id)
+            _qsp.set_attribute("dirijor.rule_id", rule_id)
+            _qsp.set_attribute("dirijor.agent_id", agent_id)
+
     if not emit_ws:
         return
 

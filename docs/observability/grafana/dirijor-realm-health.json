@@ -1,0 +1,240 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "panels": [],
+      "title": "Operator notes — span status vs HTTP",
+      "type": "row"
+    },
+    {
+      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 1 },
+      "id": 2,
+      "options": {
+        "code": { "language": "markdown", "showLineNumbers": false, "showMiniMap": false },
+        "content": "## How to read these panels\n\n| Signal | Meaning |\n|--------|---------|\n| **HTTP route spans** (FastAPI auto-instrumentation) | **HTTP status** is the response code. Span **ERROR** status usually means an unhandled exception; 4xx/5xx can still appear with OK span status depending on framework mapping — compare panels. |\n| **Manual Dirijor spans** (`dirijor.consensus`, `dirijor.terraform.subprocess`, `dirijor.realm.spin_job`, …) | Use **span status** (`ERROR` vs `OK`) for operation failure. |\n| **Wrapper** | `dirijor.wrapper.tools.invoke` — same rule: span status + HTTP on the route span. |\n\n**Realm filter:** variables `$service` and `$realm_id` apply TraceQL regex on `resource.service.name` and `span.dirijor.realm_id` where the attribute exists. Some spans (e.g. `/consensus` without `realm_id`) will not match a specific realm filter.\n\n**Latency:** Trace panels list duration per trace. Aggregate histograms require Tempo **metrics generator** + Prometheus (or Grafana Cloud) — see `docs/observability/README.md`.\n",
+        "mode": "markdown"
+      },
+      "title": "Documentation",
+      "type": "text"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 },
+      "id": 3,
+      "panels": [],
+      "title": "Latency — key operations (traces)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 7 },
+      "id": 4,
+      "options": {},
+      "targets": [
+        {
+          "datasource": { "type": "tempo", "uid": "tempo" },
+          "query": "{ resource.service.name =~ \"$service\" && name = \"dirijor.realm.spin_job\" && span.dirijor.realm_id =~ \"$realm_id\" }",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Traces — dirijor.realm.spin_job",
+      "type": "traces"
+    },
+    {
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 7 },
+      "id": 5,
+      "options": {},
+      "targets": [
+        {
+          "datasource": { "type": "tempo", "uid": "tempo" },
+          "query": "{ resource.service.name =~ \"$service\" && name = \"dirijor.realm.destroy_job\" && span.dirijor.realm_id =~ \"$realm_id\" }",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Traces — dirijor.realm.destroy_job",
+      "type": "traces"
+    },
+    {
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 17 },
+      "id": 6,
+      "options": {},
+      "targets": [
+        {
+          "datasource": { "type": "tempo", "uid": "tempo" },
+          "query": "{ resource.service.name =~ \"$service\" && span.http.route != \"\" && span.http.route !~ \"/health\" && span.http.route !~ \"^/$\" }",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Traces — HTTP API (excludes GET /health and GET /)",
+      "type": "traces"
+    },
+    {
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 17 },
+      "id": 7,
+      "options": {},
+      "targets": [
+        {
+          "datasource": { "type": "tempo", "uid": "tempo" },
+          "query": "{ resource.service.name = \"dirijor-openclaw-wrapper\" && name = \"dirijor.wrapper.tools.invoke\" }",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Traces — openclaw dirijor.wrapper.tools.invoke",
+      "type": "traces"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 },
+      "id": 8,
+      "panels": [],
+      "title": "Failures — ERROR spans & key operations",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 10, "w": 8, "x": 0, "y": 28 },
+      "id": 9,
+      "options": {},
+      "targets": [
+        {
+          "datasource": { "type": "tempo", "uid": "tempo" },
+          "query": "{ status = error && resource.service.name =~ \"$service\" }",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "ERROR traces by service",
+      "type": "traces"
+    },
+    {
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 10, "w": 8, "x": 8, "y": 28 },
+      "id": 10,
+      "options": {},
+      "targets": [
+        {
+          "datasource": { "type": "tempo", "uid": "tempo" },
+          "query": "{ status = error && name = \"dirijor.terraform.subprocess\" }",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "ERROR — dirijor.terraform.subprocess",
+      "type": "traces"
+    },
+    {
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 10, "w": 8, "x": 16, "y": 28 },
+      "id": 11,
+      "options": {},
+      "targets": [
+        {
+          "datasource": { "type": "tempo", "uid": "tempo" },
+          "query": "{ status = error && name = \"dirijor.consensus\" }",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "ERROR — dirijor.consensus",
+      "type": "traces"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 38 },
+      "id": 12,
+      "panels": [],
+      "title": "Quarantine activity (OTel span)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 39 },
+      "id": 13,
+      "options": {},
+      "targets": [
+        {
+          "datasource": { "type": "tempo", "uid": "tempo" },
+          "query": "{ name = \"dirijor.safety.quarantine_record\" && span.dirijor.realm_id =~ \"$realm_id\" }",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Traces — dirijor.safety.quarantine_record (Story 6.2)",
+      "type": "traces"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["dirijor", "realm-health"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": true, "text": ".*", "value": ".*" },
+        "hide": 0,
+        "label": "realm_id (regex)",
+        "name": "realm_id",
+        "options": [{ "selected": true, "text": ".*", "value": ".*" }],
+        "query": ".*",
+        "type": "textbox"
+      },
+      {
+        "current": { "selected": true, "text": "dirijor-core", "value": "dirijor-core" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "service.name",
+        "multi": false,
+        "name": "service",
+        "options": [
+          { "selected": true, "text": "dirijor-core", "value": "dirijor-core" },
+          { "selected": false, "text": "dirijor-openclaw-wrapper", "value": "dirijor-openclaw-wrapper" }
+        ],
+        "query": "dirijor-core, dirijor-openclaw-wrapper",
+        "type": "custom"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Dirijor — Realm health",
+  "uid": "dirijor-realm-health",
+  "version": 1,
+  "weekStart": ""
+}
