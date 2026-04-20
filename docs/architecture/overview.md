@@ -149,7 +149,7 @@ now" becomes true or false.
 
 **Bindings today (v0.1).**
 
-- OpenClaw tool surface + egress policy: Story 5.2.
+- OpenClaw tool surface + **application-layer** egress stub: **Story 5.2** *(shipped)* — `backend/openclaw-wrapper` serves `GET /health`, `POST /v1/tools/invoke` (allowlist + structured denials with `audit_id`), and `POST /v1/egress/check` (URL class stub; `deny_public` vs `allowlist` via env / JSON policy file). See `backend/openclaw-wrapper/README.md`. Infrastructure egress remains Story 2.3 / ADR-0004.
 - Integration with supervisor + canvas: follows Epic 3/5 completion.
 
 ---
@@ -185,10 +185,11 @@ is a liability, not a feature.
 ## The honest summary
 
 At v0.1, the **shape** of all four layers exists — canvas, supervisor
-contract, docker-compose, wrapper skeleton — but only the canvas shell
-and the supervisor contract are production-grade. The rest is wired
-into the readiness registry so every dependency can be asked *are you
-real yet?* and answer honestly.
+contract, docker-compose, and a **policy-aware** OpenClaw wrapper HTTP
+surface (Story 5.2) — but only the canvas shell and the supervisor
+contract are production-grade end-to-end. The rest is wired into the
+readiness registry so every dependency can be asked *are you real yet?*
+and answer honestly.
 
 That honesty is the point: when Dirijor claims "zero hallucination on
 high-stakes outputs" or "100% private by default," the
