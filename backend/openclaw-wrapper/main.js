@@ -2,7 +2,10 @@
 // Secure OpenClaw Agent Wrapper — tool allowlist + application-layer egress stub (Story 5.2)
 
 const { loadPolicy } = require('./lib/policy');
+const { initOtel } = require('./lib/otel');
 const { createServer } = require('./lib/server');
+
+initOtel();
 
 const HEADSCALE_URL = process.env.HEADSCALE_URL || 'http://localhost:8080';
 const REALM_NAME = process.env.REALM_NAME || 'default-realm';

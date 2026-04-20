@@ -2,7 +2,9 @@
 
 const http = require('http');
 const crypto = require('crypto');
+const { SpanStatusCode } = require('@opentelemetry/api');
 const { classifyUrl, isPrivateOrLocalHost, hostMatchesAllowlist } = require('./url-classify');
+const { getTracer } = require('./otel');
 
 const WRAPPER_POLICY_VERSION = '1';
 
@@ -39,17 +41,42 @@ function createServer(policy, opts) {
         const pathname = url.pathname.replace(/\/+$/, '') || '/';
 
         if (req.method === 'GET' && (pathname === '/' || pathname === '/health')) {
-            sendJson(res, 200, healthBody(policy, realm, headscaleUrl, buildId));
+            const span = getTracer().startSpan('dirijor.wrapper.health');
+            span.setAttribute('dirijor.realm', realm);
+            span.setAttribute('http.route', pathname);
+            try {
+                sendJson(res, 200, healthBody(policy, realm, headscaleUrl, buildId));
+            } finally {
+                span.end();
+            }
             return;
         }
 
         if (req.method === 'POST' && pathname === '/v1/tools/invoke') {
-            handleToolInvoke(req, res, policy, realm).catch(() => sendInternalError(res, realm));
+            const span = getTracer().startSpan('dirijor.wrapper.tools.invoke');
+            span.setAttribute('dirijor.realm', realm);
+            span.setAttribute('http.route', '/v1/tools/invoke');
+            handleToolInvoke(req, res, policy, realm)
+                .catch((err) => {
+                    span.recordException(err);
+                    span.setStatus({ code: SpanStatusCode.ERROR });
+                    sendInternalError(res, realm);
+                })
+                .finally(() => span.end());
             return;
         }
 
         if (req.method === 'POST' && pathname === '/v1/egress/check') {
-            handleEgressCheck(req, res, policy, realm).catch(() => sendInternalError(res, realm));
+            const span = getTracer().startSpan('dirijor.wrapper.egress_check');
+            span.setAttribute('dirijor.realm', realm);
+            span.setAttribute('http.route', '/v1/egress/check');
+            handleEgressCheck(req, res, policy, realm)
+                .catch((err) => {
+                    span.recordException(err);
+                    span.setStatus({ code: SpanStatusCode.ERROR });
+                    sendInternalError(res, realm);
+                })
+                .finally(() => span.end());
             return;
         }
 

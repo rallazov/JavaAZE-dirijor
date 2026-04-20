@@ -58,6 +58,25 @@ prior keys preserved). Story **4.3** adds gated **`POST /audit/export`**
 - The Docker image ships a `HEALTHCHECK` that calls `GET /health`, so
   docker / compose / K8s pick up degraded state automatically.
 
+### OpenTelemetry (Story 6.1)
+
+Export is **opt-in**. With **no** `OTEL_EXPORTER_OTLP_ENDPOINT`, the process
+does not open OTLP connections and the default tracer stays a no-op (CI stays
+hermetic). To send traces, set:
+
+| Variable | Role |
+|----------|------|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Base URL for the OTLP **HTTP** exporter (e.g. `http://localhost:4318`). **Unset = off.** |
+| `OTEL_SERVICE_NAME` | Defaults to **`dirijor-core`** for the supervisor. |
+| `OTEL_SERVICE_VERSION` | Optional; defaults track the running build. |
+| `OTEL_SDK_DISABLED` | Set to `true` / `1` to force-disable the SDK. |
+| `OTEL_HTTP_EXCLUDED_URLS` | Optional comma-separated path regexes; default excludes **`GET /health`** and **`GET /`**. |
+
+The OTLP **HTTP**/protobuf endpoint for traces is commonly on port **4318**; **gRPC**
+collectors often listen on **4317** — use an HTTP-compatible collector URL for
+the Python HTTP exporter shipped here. Do not put API keys, prompts, or raw
+consensus bodies into span attributes (the implementation follows this rule).
+
 ### `GET /` sample response
 
 ```json

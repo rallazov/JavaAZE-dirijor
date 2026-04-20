@@ -87,6 +87,7 @@ from qdrant_client.models import (
 
 import audit_export as audit_export_lib
 import mesh_bootstrap as mesh_bootstrap_lib
+import otel as otel_lib
 from safety_policy import (
     AnomalyPolicyDocument,
     load_anomaly_policy_from_path,
@@ -1187,6 +1188,15 @@ class HealthStatus(BaseModel):
 
 app = FastAPI(title="Dirijor Supervisor", version=SERVICE_VERSION)
 
+otel_lib.setup_core_observability(
+    app,
+    service_name="dirijor-core",
+    service_version=SERVICE_VERSION,
+)
+_OTEL = otel_lib.get_tracer(
+    "dirijor.supervisor", otel_lib.INSTRUMENTATION_SCOPE_VERSION
+)
+
 
 def _consensus_engine_label() -> str:
     return "ready" if _graph_compiled_ok else "unavailable"
@@ -1269,13 +1279,21 @@ async def semantic_cache_ingest(req: SemanticCacheIngestRequest) -> SemanticCach
                 "got": len(req.vector),
             },
         )
-    try:
-        return await _SEMANTIC_CACHE.ingest(req)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        logger.exception("semantic_cache.ingest_failed")
-        return _semantic_cache_503(f"{type(exc).__name__}: {exc}")
+    with _OTEL.start_as_current_span("dirijor.semantic_cache.ingest") as _sp:
+        _sp.set_attribute("semantic_cache.scope_id", req.scope_id)
+        try:
+            out = await _SEMANTIC_CACHE.ingest(req)
+            _sp.set_attribute("semantic_cache.outcome", "success")
+            return out
+        except ValueError as exc:
+            _sp.set_attribute("semantic_cache.outcome", "validation_error")
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            _sp.set_attribute(
+                "semantic_cache.outcome", _classify_semantic_cache_exception(exc)
+            )
+            logger.exception("semantic_cache.ingest_failed")
+            return _semantic_cache_503(f"{type(exc).__name__}: {exc}")
 
 
 @app.post(
@@ -1301,15 +1319,23 @@ async def semantic_cache_query(req: SemanticCacheQueryRequest) -> SemanticCacheQ
                 "got": len(req.query_vector),
             },
         )
-    try:
-        hits = await _SEMANTIC_CACHE.query(req)
-        return SemanticCacheQueryResponse(hits=hits, schema_version=SCHEMA_VERSION)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        logger.exception("semantic_cache.query_failed")
-        _log_semantic_cache_miss("qdrant_unavailable")
-        return _semantic_cache_503(f"{type(exc).__name__}: {exc}")
+    with _OTEL.start_as_current_span("dirijor.semantic_cache.query") as _sp:
+        _sp.set_attribute("semantic_cache.scope_id", req.scope_id)
+        try:
+            hits = await _SEMANTIC_CACHE.query(req)
+            _sp.set_attribute("semantic_cache.outcome", "success")
+            _sp.set_attribute("semantic_cache.hit_count", len(hits))
+            return SemanticCacheQueryResponse(hits=hits, schema_version=SCHEMA_VERSION)
+        except ValueError as exc:
+            _sp.set_attribute("semantic_cache.outcome", "validation_error")
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            _sp.set_attribute(
+                "semantic_cache.outcome", _classify_semantic_cache_exception(exc)
+            )
+            logger.exception("semantic_cache.query_failed")
+            _log_semantic_cache_miss("qdrant_unavailable")
+            return _semantic_cache_503(f"{type(exc).__name__}: {exc}")
 
 
 # --- `/consensus` ------------------------------------------------------------
@@ -1620,85 +1646,96 @@ async def run_consensus(
             },
         )
 
-    verified_from_cache, miss_reason = await _SEMANTIC_CACHE.consensus_fetch(req)
-    cache_status, cache_reason = _consensus_semantic_cache_meta(miss_reason)
-    if miss_reason:
-        _log_semantic_cache_miss(miss_reason)
+    with _OTEL.start_as_current_span("dirijor.consensus") as _cons:
+        with _OTEL.start_as_current_span("dirijor.semantic_cache.consensus_fetch") as _sc:
+            verified_from_cache, miss_reason = await _SEMANTIC_CACHE.consensus_fetch(req)
+            _sc.set_attribute("semantic_cache.outcome", miss_reason or "ok")
 
-    opinions = list(req.opinions)
-    if not opinions and req.query is not None:
-        opinions = _synthesize_opinions_from_query(req.query)
-    opinions = _assign_default_agent_ids(opinions)
+        cache_status, cache_reason = _consensus_semantic_cache_meta(miss_reason)
+        if miss_reason:
+            _log_semantic_cache_miss(miss_reason)
 
-    initial_state: AgentState = {
-        "messages": [req.query] if req.query else [],
-        "consensus_score": 0.0,
-        "verified_facts": [v.model_dump() for v in verified_from_cache],
-        "opinions": opinions,
-        "votes": [],
-        "round": 0,
-        "max_rounds": req.max_rounds,
-        "threshold": req.threshold,
-        "decision": None,
-        "termination_reason": None,
-    }
+        rid = (req.realm_id or "").strip()
+        if rid:
+            _cons.set_attribute("dirijor.realm_id", rid)
+        _cons.set_attribute("semantic_cache.status", str(cache_status))
 
-    if not opinions:
-        # Skip graph.invoke for the empty case — no propose/score work to do,
-        # and we want a crisp `rounds=1, termination_reason=no_opinions`
-        # without relying on the router's short-circuit branch (which also
-        # runs for the single-opinion path but carries different semantics).
-        result_state: AgentState = {
-            **initial_state,
-            "round": 1,
+        opinions = list(req.opinions)
+        if not opinions and req.query is not None:
+            opinions = _synthesize_opinions_from_query(req.query)
+        opinions = _assign_default_agent_ids(opinions)
+
+        initial_state: AgentState = {
+            "messages": [req.query] if req.query else [],
             "consensus_score": 0.0,
+            "verified_facts": [v.model_dump() for v in verified_from_cache],
+            "opinions": opinions,
+            "votes": [],
+            "round": 0,
+            "max_rounds": req.max_rounds,
+            "threshold": req.threshold,
             "decision": None,
-            "termination_reason": "no_opinions",
+            "termination_reason": None,
         }
-        branch = "halt_short_circuit"
-    else:
-        result_state = graph.invoke(initial_state)
-        branch = decide_router(result_state)
 
-    if not opinions:
-        termination_reason = "no_opinions"
-        decision: str | None = None
-    elif branch == "halt_threshold":
-        termination_reason = "threshold_reached"
-        decision = result_state.get("decision")
-    elif branch == "halt_max_rounds":
-        termination_reason = "max_rounds_exhausted"
-        decision = None  # AC 2: below-threshold is a normal no-decision outcome.
-    elif branch == "halt_short_circuit":
-        termination_reason = "single_opinion_shortcut"
-        decision = result_state.get("decision")
-    else:
-        # Defensive — router should always terminate on END at loop exit.
-        termination_reason = "max_rounds_exhausted"
-        decision = None
-
-    rounds = max(1, int(result_state.get("round", 1)))
-
-    vf_raw = result_state.get("verified_facts", [])
-    verified_out: list[VerifiedFact] = []
-    for item in vf_raw:
-        if isinstance(item, VerifiedFact):
-            verified_out.append(item)
+        if not opinions:
+            # Skip graph.invoke for the empty case — no propose/score work to do,
+            # and we want a crisp `rounds=1, termination_reason=no_opinions`
+            # without relying on the router's short-circuit branch (which also
+            # runs for the single-opinion path but carries different semantics).
+            result_state = {
+                **initial_state,
+                "round": 1,
+                "consensus_score": 0.0,
+                "decision": None,
+                "termination_reason": "no_opinions",
+            }
+            branch = "halt_short_circuit"
         else:
-            verified_out.append(VerifiedFact.model_validate(item))
+            result_state = graph.invoke(initial_state)
+            branch = decide_router(result_state)
 
-    payload = ConsensusResult(
-        messages=result_state.get("messages", []),
-        consensus_score=float(result_state.get("consensus_score", 0.0)),
-        verified_facts=verified_out,
-        decision=decision,
-        votes=result_state.get("votes", []),
-        termination_reason=termination_reason,
-        rounds=rounds,
-        threshold=req.threshold,
-        semantic_cache_status=cache_status,
-        semantic_cache_reason=cache_reason,
-    )
+        if not opinions:
+            termination_reason = "no_opinions"
+            decision = None
+        elif branch == "halt_threshold":
+            termination_reason = "threshold_reached"
+            decision = result_state.get("decision")
+        elif branch == "halt_max_rounds":
+            termination_reason = "max_rounds_exhausted"
+            decision = None  # AC 2: below-threshold is a normal no-decision outcome.
+        elif branch == "halt_short_circuit":
+            termination_reason = "single_opinion_shortcut"
+            decision = result_state.get("decision")
+        else:
+            # Defensive — router should always terminate on END at loop exit.
+            termination_reason = "max_rounds_exhausted"
+            decision = None
+
+        rounds = max(1, int(result_state.get("round", 1)))
+
+        vf_raw = result_state.get("verified_facts", [])
+        verified_out: list[VerifiedFact] = []
+        for item in vf_raw:
+            if isinstance(item, VerifiedFact):
+                verified_out.append(item)
+            else:
+                verified_out.append(VerifiedFact.model_validate(item))
+
+        payload = ConsensusResult(
+            messages=result_state.get("messages", []),
+            consensus_score=float(result_state.get("consensus_score", 0.0)),
+            verified_facts=verified_out,
+            decision=decision,
+            votes=result_state.get("votes", []),
+            termination_reason=termination_reason,
+            rounds=rounds,
+            threshold=req.threshold,
+            semantic_cache_status=cache_status,
+            semantic_cache_reason=cache_reason,
+        )
+        _cons.set_attribute("consensus.rounds", rounds)
+        _cons.set_attribute("consensus.termination_reason", termination_reason)
 
     # One INFO line per request at the endpoint boundary — no per-round spam.
     # Keeps stdlib logging; OTel instrumentation is Story 6.1's job.
@@ -2112,9 +2149,6 @@ def _wrap_realm_adapter_with_egress_policy(inner: RealmAdapter) -> RealmAdapter:
 # and deterministic. See `test_spin_terraform_lifecycle_progresses_to_ready`
 # for the canonical stub shape.
 #
-# TODO(6.1): OTel spans around provision/destroy subprocess calls.
-
-
 @dataclass(frozen=True)
 class CompletedRun:
     """Result of one terraform subprocess invocation."""
@@ -2319,50 +2353,59 @@ class TerraformAdapter:
                 "step": step,
             },
         )
-        t0 = time.monotonic()
-        try:
-            run = await self._runner.run(
-                args,
-                cwd=cwd,
-                env=env,
-                timeout_s=self._cmd_timeout_s,
-            )
-        except asyncio.TimeoutError:
-            dur = time.monotonic() - t0
-            logger.info(
-                "realm.terraform.%s.done" % step,
-                extra={
-                    "event": f"realm.terraform.{step}.done",
-                    "job_id": job.job_id,
-                    "realm_id": job.realm_id,
-                    "step": step,
-                    "duration_s": round(dur, 3),
-                    "exit_code": -1,
-                },
-            )
-            raise SpinValidationError(
-                code="terraform_command_timeout",
-                message=f"terraform {step} exceeded {self._cmd_timeout_s}s timeout",
-                details={
-                    "step": step,
-                    "timeout_s": self._cmd_timeout_s,
-                },
-            ) from None
+        with _OTEL.start_as_current_span("dirijor.terraform.subprocess") as _tf:
+            _tf.set_attribute("terraform.step", step)
+            _tf.set_attribute("dirijor.job_id", job.job_id)
+            _tf.set_attribute("dirijor.realm_id", job.realm_id)
+            t0 = time.monotonic()
+            try:
+                run = await self._runner.run(
+                    args,
+                    cwd=cwd,
+                    env=env,
+                    timeout_s=self._cmd_timeout_s,
+                )
+            except asyncio.TimeoutError:
+                dur = time.monotonic() - t0
+                _tf.set_attribute("terraform.exit_code", -1)
+                _tf.set_attribute("terraform.duration_ms", int(dur * 1000))
+                _tf.set_attribute("terraform.outcome", "timeout")
+                logger.info(
+                    "realm.terraform.%s.done" % step,
+                    extra={
+                        "event": f"realm.terraform.{step}.done",
+                        "job_id": job.job_id,
+                        "realm_id": job.realm_id,
+                        "step": step,
+                        "duration_s": round(dur, 3),
+                        "exit_code": -1,
+                    },
+                )
+                raise SpinValidationError(
+                    code="terraform_command_timeout",
+                    message=f"terraform {step} exceeded {self._cmd_timeout_s}s timeout",
+                    details={
+                        "step": step,
+                        "timeout_s": self._cmd_timeout_s,
+                    },
+                ) from None
 
-        dur = time.monotonic() - t0
-        preview = _scrub_secrets(run.stderr[:500])
-        log_extra = {
-            "event": f"realm.terraform.{step}.done",
-            "job_id": job.job_id,
-            "realm_id": job.realm_id,
-            "step": step,
-            "duration_s": round(dur, 3),
-            "exit_code": run.exit_code,
-        }
-        if run.exit_code != 0:
-            log_extra["stderr_preview"] = preview
-        logger.info("realm.terraform.%s.done" % step, extra=log_extra)
-        return run
+            dur = time.monotonic() - t0
+            _tf.set_attribute("terraform.exit_code", run.exit_code)
+            _tf.set_attribute("terraform.duration_ms", int(dur * 1000))
+            preview = _scrub_secrets(run.stderr[:500])
+            log_extra = {
+                "event": f"realm.terraform.{step}.done",
+                "job_id": job.job_id,
+                "realm_id": job.realm_id,
+                "step": step,
+                "duration_s": round(dur, 3),
+                "exit_code": run.exit_code,
+            }
+            if run.exit_code != 0:
+                log_extra["stderr_preview"] = preview
+            logger.info("realm.terraform.%s.done" % step, extra=log_extra)
+            return run
 
     async def validate(self, req: SpinRequest) -> None:
         token = os.environ.get("DIGITALOCEAN_TOKEN", "").strip()
@@ -2785,118 +2828,126 @@ async def _run_mesh_bootstrap_after_ready(job: SpinJob) -> None:
         payload.update(extra)
         await broadcast_event(job.realm_id, "realm.mesh.state", payload)
 
-    if not mesh_bootstrap_lib.headscale_credentials_configured():
-        if aborted():
-            return
-        err_mesh: dict[str, Any] = {
-            "status": "failed",
-            "code": "mesh_headscale_config_missing",
-            "message": (
-                "DIRIJOR_HEADSCALE_API_URL and DIRIJOR_HEADSCALE_API_KEY are "
-                "required when DIRIJOR_MESH_BOOTSTRAP_ENABLED is truthy"
-            ),
-            "correlation_id": correlation_id,
-        }
-        _mutate_outputs(job, mesh=err_mesh)
-        mesh_bootstrap_lib.log_bootstrap_finished(
-            realm_id=job.realm_id,
-            job_id=job.job_id,
-            correlation_id=correlation_id,
-            status="failed",
-            code="mesh_headscale_config_missing",
-        )
-        await _emit_mesh_event("failed", code="mesh_headscale_config_missing")
-        return
-
-    api_url = os.environ.get("DIRIJOR_HEADSCALE_API_URL", "").strip().rstrip("/")
-    api_key = os.environ.get("DIRIJOR_HEADSCALE_API_KEY", "").strip()
-    headers = {"Authorization": f"Bearer {api_key}"}
-
-    try:
-        async with httpx.AsyncClient(
-            base_url=api_url, headers=headers, timeout=30.0
-        ) as hs_client:
-            patch = await mesh_bootstrap_lib.bootstrap_ready_realm(
+    with _OTEL.start_as_current_span("dirijor.mesh.bootstrap") as _mb:
+        _mb.set_attribute("dirijor.job_id", job.job_id)
+        _mb.set_attribute("dirijor.realm_id", job.realm_id)
+        _mb.set_attribute("mesh.correlation_id", correlation_id)
+        if not mesh_bootstrap_lib.headscale_credentials_configured():
+            if aborted():
+                return
+            err_mesh: dict[str, Any] = {
+                "status": "failed",
+                "code": "mesh_headscale_config_missing",
+                "message": (
+                    "DIRIJOR_HEADSCALE_API_URL and DIRIJOR_HEADSCALE_API_KEY are "
+                    "required when DIRIJOR_MESH_BOOTSTRAP_ENABLED is truthy"
+                ),
+                "correlation_id": correlation_id,
+            }
+            _mutate_outputs(job, mesh=err_mesh)
+            mesh_bootstrap_lib.log_bootstrap_finished(
                 realm_id=job.realm_id,
+                job_id=job.job_id,
                 correlation_id=correlation_id,
-                aborted=aborted,
-                client=hs_client,
+                status="failed",
+                code="mesh_headscale_config_missing",
             )
-    except mesh_bootstrap_lib.HeadscaleMeshError as exc:
-        if exc.code == "mesh_bootstrap_aborted":
+            await _emit_mesh_event("failed", code="mesh_headscale_config_missing")
+            return
+
+        api_url = os.environ.get("DIRIJOR_HEADSCALE_API_URL", "").strip().rstrip("/")
+        api_key = os.environ.get("DIRIJOR_HEADSCALE_API_KEY", "").strip()
+        headers = {"Authorization": f"Bearer {api_key}"}
+
+        try:
+            with _OTEL.start_as_current_span(
+                "dirijor.mesh.bootstrap.ready_realm"
+            ) as _msh:
+                _msh.set_attribute("dirijor.job_id", job.job_id)
+                _msh.set_attribute("dirijor.realm_id", job.realm_id)
+                async with httpx.AsyncClient(
+                    base_url=api_url, headers=headers, timeout=30.0
+                ) as hs_client:
+                    patch = await mesh_bootstrap_lib.bootstrap_ready_realm(
+                        realm_id=job.realm_id,
+                        correlation_id=correlation_id,
+                        aborted=aborted,
+                        client=hs_client,
+                    )
+        except mesh_bootstrap_lib.HeadscaleMeshError as exc:
+            if exc.code == "mesh_bootstrap_aborted":
+                mesh_bootstrap_lib.log_bootstrap_finished(
+                    realm_id=job.realm_id,
+                    job_id=job.job_id,
+                    correlation_id=correlation_id,
+                    status="aborted",
+                    code=exc.code,
+                )
+                return
+            err_mesh = {
+                "status": "failed",
+                "code": exc.code,
+                "message": exc.message,
+                "correlation_id": correlation_id,
+            }
+            if exc.http_status is not None:
+                err_mesh["http_status"] = exc.http_status
+            _mutate_outputs(job, mesh=err_mesh)
+            mesh_bootstrap_lib.log_bootstrap_finished(
+                realm_id=job.realm_id,
+                job_id=job.job_id,
+                correlation_id=correlation_id,
+                status="failed",
+                code=exc.code,
+            )
+            await _emit_mesh_event("failed", code=exc.code, message=exc.message)
+            return
+        except Exception:
+            logger.exception(
+                "mesh.bootstrap.crash",
+                extra={
+                    "event": "mesh.bootstrap.crash",
+                    "realm_id": job.realm_id,
+                    "job_id": job.job_id,
+                    "correlation_id": correlation_id,
+                },
+            )
+            err_mesh = {
+                "status": "failed",
+                "code": "mesh_bootstrap_internal",
+                "message": "unexpected mesh bootstrap failure",
+                "correlation_id": correlation_id,
+            }
+            _mutate_outputs(job, mesh=err_mesh)
+            mesh_bootstrap_lib.log_bootstrap_finished(
+                realm_id=job.realm_id,
+                job_id=job.job_id,
+                correlation_id=correlation_id,
+                status="failed",
+                code="mesh_bootstrap_internal",
+            )
+            await _emit_mesh_event("failed", code="mesh_bootstrap_internal")
+            return
+
+        if aborted():
             mesh_bootstrap_lib.log_bootstrap_finished(
                 realm_id=job.realm_id,
                 job_id=job.job_id,
                 correlation_id=correlation_id,
                 status="aborted",
-                code=exc.code,
             )
             return
-        err_mesh = {
-            "status": "failed",
-            "code": exc.code,
-            "message": exc.message,
-            "correlation_id": correlation_id,
-        }
-        if exc.http_status is not None:
-            err_mesh["http_status"] = exc.http_status
-        _mutate_outputs(job, mesh=err_mesh)
+
+        _mutate_outputs(job, **patch)
         mesh_bootstrap_lib.log_bootstrap_finished(
             realm_id=job.realm_id,
             job_id=job.job_id,
             correlation_id=correlation_id,
-            status="failed",
-            code=exc.code,
+            status="ready",
         )
-        await _emit_mesh_event("failed", code=exc.code, message=exc.message)
-        return
-    except Exception:
-        logger.exception(
-            "mesh.bootstrap.crash",
-            extra={
-                "event": "mesh.bootstrap.crash",
-                "realm_id": job.realm_id,
-                "job_id": job.job_id,
-                "correlation_id": correlation_id,
-            },
-        )
-        err_mesh = {
-            "status": "failed",
-            "code": "mesh_bootstrap_internal",
-            "message": "unexpected mesh bootstrap failure",
-            "correlation_id": correlation_id,
-        }
-        _mutate_outputs(job, mesh=err_mesh)
-        mesh_bootstrap_lib.log_bootstrap_finished(
-            realm_id=job.realm_id,
-            job_id=job.job_id,
-            correlation_id=correlation_id,
-            status="failed",
-            code="mesh_bootstrap_internal",
-        )
-        await _emit_mesh_event("failed", code="mesh_bootstrap_internal")
-        return
-
-    if aborted():
-        mesh_bootstrap_lib.log_bootstrap_finished(
-            realm_id=job.realm_id,
-            job_id=job.job_id,
-            correlation_id=correlation_id,
-            status="aborted",
-        )
-        return
-
-    _mutate_outputs(job, **patch)
-    mesh_bootstrap_lib.log_bootstrap_finished(
-        realm_id=job.realm_id,
-        job_id=job.job_id,
-        correlation_id=correlation_id,
-        status="ready",
-    )
-    await _emit_mesh_event("ready")
+        await _emit_mesh_event("ready")
 
 
-# TODO(6.1): wrap `_run_spin_job` in an OTel span once Story 6.1 lands.
 async def _run_spin_job(
     job: SpinJob, req: SpinRequest, adapter: RealmAdapter
 ) -> None:
@@ -2923,174 +2974,186 @@ async def _run_spin_job(
     surface; callers relying on secret-safety must add scrubbing at the
     adapter boundary.
     """
-    started = time.monotonic()
-    terminal_code: str | None = None
-    # `error_source` tracks the call that raised. Only an adapter call
-    # produces `adapter_error`; everything else is `internal`. See the
-    # docstring above for the full routing table.
-    error_source: str = "pre-adapter"
-    try:
+    with _OTEL.start_as_current_span("dirijor.realm.spin_job") as _sj:
+        _sj.set_attribute("dirijor.job_id", job.job_id)
+        _sj.set_attribute("dirijor.realm_id", job.realm_id)
+        _sj.set_attribute("dirijor.realm_adapter", adapter.name)
+        started = time.monotonic()
+        terminal_code: str | None = None
+        # `error_source` tracks the call that raised. Only an adapter call
+        # produces `adapter_error`; everything else is `internal`. See the
+        # docstring above for the full routing table.
+        error_source: str = "pre-adapter"
         try:
-            error_source = "adapter.validate"
-            await adapter.validate(req)
-        except SpinValidationError as exc:
-            _update_job(
-                job,
-                phase="failed",
-                error=SpinError(
-                    code=exc.code,
-                    message=exc.message,
-                    details=exc.details,
-                ),
+            try:
+                error_source = "adapter.validate"
+                await adapter.validate(req)
+            except SpinValidationError as exc:
+                _update_job(
+                    job,
+                    phase="failed",
+                    error=SpinError(
+                        code=exc.code,
+                        message=exc.message,
+                        details=exc.details,
+                    ),
+                )
+                terminal_code = exc.code
+                return
+
+            error_source = "post-validate"
+            _update_job(job, phase="provisioning")
+
+            error_source = "adapter.provision"
+            try:
+                outputs = await adapter.provision(req, job)
+            except SpinValidationError as exc:
+                _update_job(
+                    job,
+                    phase="failed",
+                    error=SpinError(
+                        code=exc.code,
+                        message=exc.message,
+                        details=exc.details,
+                    ),
+                )
+                terminal_code = exc.code
+                return
+            if not isinstance(outputs, dict):
+                # Keep `error_source == "adapter.provision"` so the outer
+                # `except` attributes this to the adapter (adapter_error),
+                # not to the post-provision code path (internal).
+                raise RuntimeError(
+                    f"adapter {adapter.name!r}.provision returned "
+                    f"{type(outputs).__name__}, expected dict"
+                )
+
+            error_source = "post-provision"
+            _update_job(job, phase="ready", outputs=outputs)
+            error_source = "mesh-bootstrap"
+            await _run_mesh_bootstrap_after_ready(job)
+        except asyncio.CancelledError:
+            # Cooperative cancellation: re-raise so the event loop can reap
+            # the task. The `finally:` block still releases the realm_id so
+            # a subsequent spin of the same realm_id is not 409-blocked.
+            raise
+        except Exception as exc:
+            logger.exception(
+                "realm.spin.crash",
+                extra={
+                    "event": "realm.spin.crash",
+                    "job_id": job.job_id,
+                    "realm_id": job.realm_id,
+                    "adapter": adapter.name,
+                    "error_source": error_source,
+                },
             )
-            terminal_code = exc.code
-            return
-
-        error_source = "post-validate"
-        _update_job(job, phase="provisioning")
-
-        error_source = "adapter.provision"
-        try:
-            outputs = await adapter.provision(req, job)
-        except SpinValidationError as exc:
-            _update_job(
-                job,
-                phase="failed",
-                error=SpinError(
-                    code=exc.code,
-                    message=exc.message,
-                    details=exc.details,
-                ),
+            # Cap the preview to keep the response body small — NOT a
+            # secret-scrubber; see the function docstring.
+            tb_preview = traceback.format_exc()[-500:]
+            code: SpinErrorCode = (
+                "adapter_error" if error_source.startswith("adapter.") else "internal"
             )
-            terminal_code = exc.code
-            return
-        if not isinstance(outputs, dict):
-            # Keep `error_source == "adapter.provision"` so the outer
-            # `except` attributes this to the adapter (adapter_error),
-            # not to the post-provision code path (internal).
-            raise RuntimeError(
-                f"adapter {adapter.name!r}.provision returned "
-                f"{type(outputs).__name__}, expected dict"
-            )
-
-        error_source = "post-provision"
-        _update_job(job, phase="ready", outputs=outputs)
-        error_source = "mesh-bootstrap"
-        await _run_mesh_bootstrap_after_ready(job)
-    except asyncio.CancelledError:
-        # Cooperative cancellation: re-raise so the event loop can reap
-        # the task. The `finally:` block still releases the realm_id so
-        # a subsequent spin of the same realm_id is not 409-blocked.
-        raise
-    except Exception as exc:
-        logger.exception(
-            "realm.spin.crash",
-            extra={
-                "event": "realm.spin.crash",
-                "job_id": job.job_id,
-                "realm_id": job.realm_id,
-                "adapter": adapter.name,
-                "error_source": error_source,
-            },
-        )
-        # Cap the preview to keep the response body small — NOT a
-        # secret-scrubber; see the function docstring.
-        tb_preview = traceback.format_exc()[-500:]
-        code: SpinErrorCode = (
-            "adapter_error" if error_source.startswith("adapter.") else "internal"
-        )
-        if job.phase not in _TERMINAL_PHASES:
-            _update_job(
-                job,
-                phase="failed",
-                error=SpinError(
-                    code=code,
-                    message=str(exc),
-                    details={
-                        "exc_type": type(exc).__name__,
-                        "traceback_preview": tb_preview,
-                    },
-                ),
-            )
-            terminal_code = code
-        # Deliberately do NOT re-raise for non-cancel exceptions —
-        # propagating from a background task would orphan the job in a
-        # non-terminal phase. The failure is now encoded in job state.
-    finally:
-        # Unconditional cleanup: even if `_update_job` / `logger.exception`
-        # itself raised above, the realm_id must be released so the next
-        # spin with the same realm_id is not permanently 409-locked.
-        _JOB_BY_REALM.pop(job.realm_id, None)
-        _log_job_done(job, started, terminal_code)
+            if job.phase not in _TERMINAL_PHASES:
+                _update_job(
+                    job,
+                    phase="failed",
+                    error=SpinError(
+                        code=code,
+                        message=str(exc),
+                        details={
+                            "exc_type": type(exc).__name__,
+                            "traceback_preview": tb_preview,
+                        },
+                    ),
+                )
+                terminal_code = code
+            # Deliberately do NOT re-raise for non-cancel exceptions —
+            # propagating from a background task would orphan the job in a
+            # non-terminal phase. The failure is now encoded in job state.
+        finally:
+            # Unconditional cleanup: even if `_update_job` / `logger.exception`
+            # itself raised above, the realm_id must be released so the next
+            # spin with the same realm_id is not permanently 409-locked.
+            _JOB_BY_REALM.pop(job.realm_id, None)
+            _log_job_done(job, started, terminal_code)
 
 
-# TODO(6.1): wrap `_run_destroy_job` in an OTel span once Story 6.1 lands.
 async def _run_destroy_job(job: SpinJob, adapter: RealmAdapter) -> None:
     """Background destroy runner — keeps `phase == ready`; mutates outputs only."""
-    started = time.monotonic()
-    try:
-        await adapter.destroy(job)
-    except asyncio.CancelledError:
-        # Allow a subsequent DELETE to retry if the task was cancelled
-        # mid-flight (tests / cooperative shutdown).
-        _mutate_outputs(
-            job,
-            _remove_keys=frozenset({"destroy_requested_at"}),
-        )
-        raise
-    except SpinValidationError as exc:
-        _mutate_outputs(
-            job,
-            destroyed=False,
-            destroy_error={
-                "code": exc.code,
-                "message": exc.message,
-                "details": exc.details,
-            },
-        )
-        logger.warning(
-            "realm.spin.destroy_failed",
-            extra={
-                "event": "realm.spin.destroy_failed",
-                "job_id": job.job_id,
-                "realm_id": job.realm_id,
-                "duration_s": round(time.monotonic() - started, 3),
-                "code": exc.code,
-            },
-        )
-        return
-    except Exception as exc:
-        _mutate_outputs(
-            job,
-            destroyed=False,
-            destroy_error={
-                "code": "terraform_destroy_failed",
-                "message": str(exc),
-                "details": {"exc_type": type(exc).__name__},
-            },
-        )
-        logger.warning(
-            "realm.spin.destroy_failed",
-            extra={
-                "event": "realm.spin.destroy_failed",
-                "job_id": job.job_id,
-                "realm_id": job.realm_id,
-                "duration_s": round(time.monotonic() - started, 3),
-            },
-        )
-        return
+    with _OTEL.start_as_current_span("dirijor.realm.destroy_job") as _dj:
+        _dj.set_attribute("dirijor.job_id", job.job_id)
+        _dj.set_attribute("dirijor.realm_id", job.realm_id)
+        _dj.set_attribute("dirijor.realm_adapter", adapter.name)
+        started = time.monotonic()
+        try:
+            await adapter.destroy(job)
+        except asyncio.CancelledError:
+            # Allow a subsequent DELETE to retry if the task was cancelled
+            # mid-flight (tests / cooperative shutdown).
+            _mutate_outputs(
+                job,
+                _remove_keys=frozenset({"destroy_requested_at"}),
+            )
+            raise
+        except SpinValidationError as exc:
+            _dj.set_attribute("realm.destroy.outcome", "validation_error")
+            _dj.set_attribute("realm.destroy.error_code", exc.code)
+            _mutate_outputs(
+                job,
+                destroyed=False,
+                destroy_error={
+                    "code": exc.code,
+                    "message": exc.message,
+                    "details": exc.details,
+                },
+            )
+            logger.warning(
+                "realm.spin.destroy_failed",
+                extra={
+                    "event": "realm.spin.destroy_failed",
+                    "job_id": job.job_id,
+                    "realm_id": job.realm_id,
+                    "duration_s": round(time.monotonic() - started, 3),
+                    "code": exc.code,
+                },
+            )
+            return
+        except Exception as exc:
+            _dj.set_attribute("realm.destroy.outcome", "failed")
+            _dj.set_attribute("realm.destroy.error_class", type(exc).__name__)
+            _mutate_outputs(
+                job,
+                destroyed=False,
+                destroy_error={
+                    "code": "terraform_destroy_failed",
+                    "message": str(exc),
+                    "details": {"exc_type": type(exc).__name__},
+                },
+            )
+            logger.warning(
+                "realm.spin.destroy_failed",
+                extra={
+                    "event": "realm.spin.destroy_failed",
+                    "job_id": job.job_id,
+                    "realm_id": job.realm_id,
+                    "duration_s": round(time.monotonic() - started, 3),
+                },
+            )
+            return
 
-    destroyed_at = _iso_now()
-    _mutate_outputs(job, destroyed=True, destroyed_at=destroyed_at)
-    logger.info(
-        "realm.spin.destroyed",
-        extra={
-            "event": "realm.spin.destroyed",
-            "job_id": job.job_id,
-            "realm_id": job.realm_id,
-            "duration_s": round(time.monotonic() - started, 3),
-        },
-    )
+        destroyed_at = _iso_now()
+        _dj.set_attribute("realm.destroy.outcome", "success")
+        _mutate_outputs(job, destroyed=True, destroyed_at=destroyed_at)
+        logger.info(
+            "realm.spin.destroyed",
+            extra={
+                "event": "realm.spin.destroyed",
+                "job_id": job.job_id,
+                "realm_id": job.realm_id,
+                "duration_s": round(time.monotonic() - started, 3),
+            },
+        )
 
 
 # --- HTTP routes -------------------------------------------------------------
@@ -3852,31 +3915,39 @@ async def broadcast_event(
             f"must be one of {_SUPPORTED_EVENT_TYPES}"
         )
 
-    # TODO(6.1): wrap this function in an OTel span once Story 6.1 lands.
-    delivered = 0
-    dead: list[_WsSession] = []
-    for session in list(_CONNECTIONS.get(realm_id, set())):
-        try:
-            await _send_envelope(session, event_type, payload)
-            delivered += 1
-        except Exception as exc:  # pragma: no cover — exercised by test_ws_close_1011
-            logger.warning(
-                "ws.broadcast.drop realm=%s conn=%s err=%s",
-                realm_id,
-                session.connection_id,
-                exc,
-            )
-            dead.append(session)
-    for session in dead:
-        bucket = _CONNECTIONS.get(realm_id)
-        if bucket is not None:
-            bucket.discard(session)
-            if not bucket:
-                _CONNECTIONS.pop(realm_id, None)
-        try:
-            await session.ws.close(code=1011, reason="broadcast_send_failed")
-        except Exception:  # pragma: no cover
-            pass
+    with _OTEL.start_as_current_span("dirijor.realtime.broadcast") as _br:
+        sessions = list(_CONNECTIONS.get(realm_id, set()))
+        subscribers = len(sessions)
+        _br.set_attribute("dirijor.realm_id", realm_id)
+        _br.set_attribute("realtime.event_type", event_type)
+        _br.set_attribute("realtime.subscriber_count", subscribers)
+        delivered = 0
+        dead: list[_WsSession] = []
+        for session in sessions:
+            try:
+                await _send_envelope(session, event_type, payload)
+                delivered += 1
+            except Exception as exc:  # pragma: no cover — exercised by test_ws_close_1011
+                logger.warning(
+                    "ws.broadcast.drop realm=%s conn=%s err=%s",
+                    realm_id,
+                    session.connection_id,
+                    exc,
+                )
+                dead.append(session)
+        for session in dead:
+            bucket = _CONNECTIONS.get(realm_id)
+            if bucket is not None:
+                bucket.discard(session)
+                if not bucket:
+                    _CONNECTIONS.pop(realm_id, None)
+            try:
+                await session.ws.close(code=1011, reason="broadcast_send_failed")
+            except Exception:  # pragma: no cover
+                pass
+        _br.set_attribute("realtime.delivered", delivered)
+        # Count of subscribers whose send raised (evicted after loop); not per-frame bodies.
+        _br.set_attribute("realtime.broadcast_send_errors", len(dead))
     return delivered
 
 
@@ -3951,52 +4022,61 @@ async def realm_ws(websocket: WebSocket, realm_id: str) -> None:
         },
     )
 
-    started = time.monotonic()
-    close_code: int | None = None
-    try:
-        await _send_envelope(
-            session,
-            "session.hello",
-            {
-                "service_version": SERVICE_VERSION,
-                "schema_version": SCHEMA_VERSION,
-                "supported_event_types": list(_SUPPORTED_EVENT_TYPES),
-                "heartbeat_interval_s": HEARTBEAT_INTERVAL_S,
-                "connection_id": session.connection_id,
-            },
-        )
-        session.heartbeat_task = asyncio.create_task(_heartbeat_loop(session))
-        while True:
-            # v0.1 is Core → Canvas only. Canvas → Core commands remain HTTP
-            # POST (Story 2.1 spin, Story 4.x HITL). We receive_text to keep
-            # the connection draining but intentionally discard the payload.
-            await websocket.receive_text()
-    except WebSocketDisconnect as disc:
-        close_code = disc.code
-    except Exception:  # pragma: no cover - defensive against unexpected failures
-        logger.exception(
-            "ws.session.crashed conn=%s", session.connection_id
-        )
-    finally:
-        if session.heartbeat_task and not session.heartbeat_task.done():
-            session.heartbeat_task.cancel()
-            try:
-                await session.heartbeat_task
-            except (asyncio.CancelledError, Exception):
-                pass
-        bucket = _CONNECTIONS.get(realm_id)
-        if bucket is not None:
-            bucket.discard(session)
-            if not bucket:
-                _CONNECTIONS.pop(realm_id, None)
-        logger.info(
-            "ws.session.close",
-            extra={
-                "event": "ws.session.close",
-                "realm_id": realm_id,
-                "connection_id": session.connection_id,
-                "close_code": close_code,
-                "seq_last": session.seq,
-                "duration_s": round(time.monotonic() - started, 3),
-            },
-        )
+    with _OTEL.start_as_current_span("dirijor.ws.realm_session") as _wss:
+        _wss.set_attribute("dirijor.realm_id", realm_id)
+        _wss.set_attribute("realtime.connection_id", session.connection_id)
+        started = time.monotonic()
+        close_code: int | None = None
+        try:
+            await _send_envelope(
+                session,
+                "session.hello",
+                {
+                    "service_version": SERVICE_VERSION,
+                    "schema_version": SCHEMA_VERSION,
+                    "supported_event_types": list(_SUPPORTED_EVENT_TYPES),
+                    "heartbeat_interval_s": HEARTBEAT_INTERVAL_S,
+                    "connection_id": session.connection_id,
+                },
+            )
+            session.heartbeat_task = asyncio.create_task(_heartbeat_loop(session))
+            while True:
+                # v0.1 is Core → Canvas only. Canvas → Core commands remain HTTP
+                # POST (Story 2.1 spin, Story 4.x HITL). We receive_text to keep
+                # the connection draining but intentionally discard the payload.
+                await websocket.receive_text()
+        except WebSocketDisconnect as disc:
+            close_code = disc.code
+        except Exception:  # pragma: no cover - defensive against unexpected failures
+            logger.exception(
+                "ws.session.crashed conn=%s", session.connection_id
+            )
+        finally:
+            _wss.set_attribute(
+                "websocket.session_duration_ms",
+                int((time.monotonic() - started) * 1000),
+            )
+            if close_code is not None:
+                _wss.set_attribute("websocket.close_code", int(close_code))
+            if session.heartbeat_task and not session.heartbeat_task.done():
+                session.heartbeat_task.cancel()
+                try:
+                    await session.heartbeat_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            bucket = _CONNECTIONS.get(realm_id)
+            if bucket is not None:
+                bucket.discard(session)
+                if not bucket:
+                    _CONNECTIONS.pop(realm_id, None)
+            logger.info(
+                "ws.session.close",
+                extra={
+                    "event": "ws.session.close",
+                    "realm_id": realm_id,
+                    "connection_id": session.connection_id,
+                    "close_code": close_code,
+                    "seq_last": session.seq,
+                    "duration_s": round(time.monotonic() - started, 3),
+                },
+            )

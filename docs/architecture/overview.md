@@ -167,7 +167,15 @@ bolt-on, they rot.
 
 **Bindings today (v0.1).**
 
-- Core + runtime OTel instrumentation: Story 6.1.
+- Core + OpenClaw wrapper ship **opt-in OTLP traces** (HTTP/protobuf to
+  `OTEL_EXPORTER_OTLP_ENDPOINT`, typically port **4318**; gRPC collectors use
+  **4317** — configure the exporter to match your collector). Default dev/test
+  leaves export **off** (no collector required). Service names:
+  **`dirijor-core`** and **`dirijor-openclaw-wrapper`** (overridable via
+  `OTEL_SERVICE_NAME`). FastAPI routes are auto-instrumented with
+  **`GET /health`** and **`GET /`** excluded from high-churn noise; WebSocket
+  sessions use manual `dirijor.ws.*` spans. Span attributes intentionally omit
+  secrets, raw prompts, and tool bodies — see repo README + wrapper README.
 - Grafana dashboards: Story 6.2.
 - Canvas-integrated live safety metrics: Story 6.3.
 
