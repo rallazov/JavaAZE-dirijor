@@ -30,7 +30,7 @@ v0.1 supervisor exposes — no opinions, no recommendations. For the
 | Field | Value | Meaning |
 |---|---|---|
 | `SERVICE_VERSION` | `"0.1.0"` | Module constant; `FastAPI(version=...)` and every response read this. |
-| `SCHEMA_VERSION` | `7` | Contract shape version. Story 4.3 bumped 6→7: gated `POST /audit/export` (ZIP audit bundle); realm-scoped in-memory audit ring; new `SpinError` codes `audit_export_disabled`, `audit_export_too_large`, `audit_export_invalid_window`. Story 4.2 bumped 5→6: optional `realm_id` / `anomaly_subject_agent_id` on `POST /consensus`; `GET /safety/quarantine/{realm_id}`; gated `POST /safety/signal`; optional `anomaly_policy` readiness entry; WebSocket payloads remain existing `topology.delta` / `hitl.pending` types (additive agent fields such as `status: "quarantined"`). Story 4.1 bumped 4→5: semantic-cache HTTP + consensus cache fields + `semantic_cache` probe. Story 2.2 bumped 3→4 (`DELETE /realms/{job_id}` + destroy-related `outputs` keys + nine new `SpinError.code` values). Story 3.2 bumped 1→2 (debate loop), Story 3.3 bumped 2→3 (WebSocket channel + `realtime` block). Story 2.1 added the `realm_manager` readiness-registry dep without bumping — precedent for "dep-only additive" extensions. Story 2.3 added **`egress_policy_denied`** and Terraform egress controls **without** bumping `SCHEMA_VERSION` (env- and module-driven only). |
+| `SCHEMA_VERSION` | `8` | Contract shape version. Story 5.1 bumped 7→8: gated mesh bootstrap after `phase == ready` (`DIRIJOR_MESH_BOOTSTRAP_ENABLED` truthy like `DIRIJOR_AUDIT_EXPORT_ENABLED` / `DIRIJOR_SAFETY_SIGNALS_ENABLED`: `1` / `true` / `yes`); additive `outputs.mesh`, `outputs.headscale_control_url`; `POST /realms/{job_id}/mesh/preauth-key` (one-shot secret, not echoed on `GET` poll); `POST /realms/{job_id}/mesh/retry`; WebSocket `realm.mesh.state`; `SpinError` codes `mesh_bootstrap_disabled`, `mesh_preauth_consumed`, `mesh_preauth_not_eligible`, `mesh_headscale_api_error`, `mesh_retry_conflict`. Story 4.3 bumped 6→7: gated `POST /audit/export` (ZIP audit bundle); realm-scoped in-memory audit ring; new `SpinError` codes `audit_export_disabled`, `audit_export_too_large`, `audit_export_invalid_window`. Story 4.2 bumped 5→6: optional `realm_id` / `anomaly_subject_agent_id` on `POST /consensus`; `GET /safety/quarantine/{realm_id}`; gated `POST /safety/signal`; optional `anomaly_policy` readiness entry; WebSocket payloads remain existing `topology.delta` / `hitl.pending` types (additive agent fields such as `status: "quarantined"`). Story 4.1 bumped 4→5: semantic-cache HTTP + consensus cache fields + `semantic_cache` probe. Story 2.2 bumped 3→4 (`DELETE /realms/{job_id}` + destroy-related `outputs` keys + nine new `SpinError.code` values). Story 3.2 bumped 1→2 (debate loop), Story 3.3 bumped 2→3 (WebSocket channel + `realtime` block). Story 2.1 added the `realm_manager` readiness-registry dep without bumping — precedent for "dep-only additive" extensions. Story 2.3 added **`egress_policy_denied`** and Terraform egress controls **without** bumping `SCHEMA_VERSION` (env- and module-driven only). |
 
 ## Endpoints at a glance
 
@@ -43,6 +43,8 @@ v0.1 supervisor exposes — no opinions, no recommendations. For the
 | `POST` | `/semantic-cache/query`       | Similarity query within a `scope_id` (Story 4.1)                        | `200` / `400` / `503` |
 | `POST` | `/realms/spin`                | Enqueue a realm provisioning job (Story 2.1 — adapter-backed, async)  | `202` / `400` / `409` / `503` |
 | `GET`  | `/realms/{job_id}`            | Poll spin job state (Story 2.1 — `validating → provisioning → ready \| failed`) | `200` / `404` |
+| `POST` | `/realms/{job_id}/mesh/preauth-key` | Mint one Headscale preauth key per job (Story 5.1 — secret not stored on poll body) | `200` / `404` / `409` / `410` / `502` |
+| `POST` | `/realms/{job_id}/mesh/retry` | Re-run mesh bootstrap after transient Headscale errors (Story 5.1) | `200` / `403` / `404` / `409` |
 | `DELETE` | `/realms/{job_id}`          | Request realm destroy (Story 2.2 — adapter-scoped; poll `GET` for completion) | `202` / `204` / `404` / `409` / `500` |
 | `GET`  | `/safety/quarantine/{realm_id}` | List quarantined agents for a realm (Story 4.2, shipped — in-process registry) | `200` / `400` (`SpinError`) |
 | `POST` | `/safety/signal`              | Inject synthetic anomaly signal for tests/demos (Story 4.2, shipped — **off** unless `DIRIJOR_SAFETY_SIGNALS_ENABLED` is truthy) | `204` / `400` / `403` |
@@ -99,7 +101,7 @@ Pydantic model: `RootStatus`.
 {
   "service": "dirijor-supervisor",
   "version": "0.1.0",
-  "schema_version": 7,
+  "schema_version": 8,
   "status": "operational",
   "consensus_engine": "ready",
   "uptime_s": 12.4,
@@ -110,12 +112,12 @@ Pydantic model: `RootStatus`.
     "realm_manager":     { "ready": true,  "required": true,  "detail": null },
     "semantic_cache":    { "ready": false, "required": false, "detail": "not configured" },
     "anomaly_policy":    { "ready": true,  "required": false, "detail": null },
-    "mesh":              { "ready": false, "required": false, "detail": "planned — see Story 5.1" }
+    "mesh":              { "ready": true, "required": false, "detail": "mesh bootstrap disabled (set DIRIJOR_MESH_BOOTSTRAP_ENABLED=1 to opt in)" }
   },
   "realtime": {
     "connections": 0,
     "heartbeat_interval_s": 15.0,
-    "schema_version": 7
+    "schema_version": 8
   }
 }
 ```
@@ -149,7 +151,7 @@ Pydantic model: `HealthStatus`.
 {
   "status": "ok",
   "version": "0.1.0",
-  "schema_version": 7,
+  "schema_version": 8,
   "uptime_s": 12.4,
   "timestamp": "2026-04-16T10:12:44.117Z",
   "checks": {
@@ -159,7 +161,7 @@ Pydantic model: `HealthStatus`.
     "realm_manager":     { "ready": true,  "required": true,  "detail": null },
     "semantic_cache":    { "ready": false, "required": false, "detail": "not configured" },
     "anomaly_policy":    { "ready": true,  "required": false, "detail": null },
-    "mesh":              { "ready": false, "required": false, "detail": "planned — see Story 5.1" }
+    "mesh":              { "ready": true, "required": false, "detail": "mesh bootstrap disabled (set DIRIJOR_MESH_BOOTSTRAP_ENABLED=1 to opt in)" }
   }
 }
 ```
@@ -175,7 +177,7 @@ status code and `status` field differ.
 {
   "status": "degraded",
   "version": "0.1.0",
-  "schema_version": 7,
+  "schema_version": 8,
   "uptime_s": 342.0,
   "timestamp": "2026-04-16T10:18:02.554Z",
   "checks": {
@@ -185,7 +187,7 @@ status code and `status` field differ.
     "realm_manager":     { "ready": true,  "required": true,  "detail": null },
     "semantic_cache":    { "ready": false, "required": false, "detail": "not configured" },
     "anomaly_policy":    { "ready": true,  "required": false, "detail": null },
-    "mesh":              { "ready": false, "required": false, "detail": "planned — see Story 5.1" }
+    "mesh":              { "ready": true, "required": false, "detail": "mesh bootstrap disabled (set DIRIJOR_MESH_BOOTSTRAP_ENABLED=1 to opt in)" }
   }
 }
 ```
@@ -481,8 +483,11 @@ unzip -l audit-bundle.zip
 **Purpose.** Enqueue a realm provisioning job. Shipped by **Story 2.1**
 (done 2026-04-18). v0.1 ships one adapter (`local-noop`) that simulates
 provisioning in-process; Story 2.2 registers `TerraformAdapter`, Story
-2.3 wraps `.provision` with default-deny egress, Story 5.1 consumes
-`outputs.mesh_endpoint` to enroll the mesh. The HTTP contract is
+2.3 wraps `.provision` with default-deny egress; Story 5.1 (optional) runs
+Headscale enrollment **after** `phase == "ready"` when
+`DIRIJOR_MESH_BOOTSTRAP_ENABLED` is truthy, adding `outputs.mesh` and
+`outputs.headscale_control_url` while **preserving** legacy `mesh_endpoint`
+(`tf://…` / `noop://…`). The HTTP contract is
 designed to stay stable across those future stories — consumers bind to
 this page, not to adapter implementations.
 
@@ -572,6 +577,23 @@ additive change and requires updating this page in the same PR.
 | `audit_export_disabled`      | `403` | `POST /audit/export` when `DIRIJOR_AUDIT_EXPORT_ENABLED` is not truthy. `details.env` names the variable. |
 | `audit_export_too_large`     | `413` | Estimated uncompressed export exceeds `DIRIJOR_AUDIT_EXPORT_MAX_UNCOMPRESSED_BYTES`. `details.limit_bytes`, `details.estimated_bytes`. |
 | `audit_export_invalid_window`| `400` | Bad UTC `Z` timestamps, inverted window, span over `DIRIJOR_AUDIT_EXPORT_MAX_WINDOW_HOURS`, or Pydantic validation on the export body. |
+| `mesh_bootstrap_disabled`    | `403` | `POST /realms/{job_id}/mesh/retry` when `DIRIJOR_MESH_BOOTSTRAP_ENABLED` is not truthy. |
+| `mesh_preauth_consumed`     | `410` | Second `POST /realms/{job_id}/mesh/preauth-key` for the same job (secret is one-shot; poll never echoes the key). |
+| `mesh_preauth_not_eligible`  | `409` | Preauth when `phase != "ready"`, `outputs.mesh.status != "ready"`, or Headscale user metadata is missing. |
+| `mesh_headscale_api_error`   | `502` | Upstream Headscale HTTP failure on preauth mint (or credentials missing on supervisor for that route). |
+| `mesh_retry_conflict`        | `409` | `POST .../mesh/retry` when `phase != "ready"` or destroy is active. |
+
+**`outputs.mesh` job-attached codes (not HTTP `SpinError` bodies):** when
+`DIRIJOR_MESH_BOOTSTRAP_ENABLED` is truthy, `GET /realms/{job_id}` may include
+`outputs.mesh.code` for failures while `phase` remains `ready`:
+
+| Code | Meaning |
+|------|---------|
+| `mesh_headscale_config_missing` | Gate on without both `DIRIJOR_HEADSCALE_API_URL` and `DIRIJOR_HEADSCALE_API_KEY`. |
+| `mesh_headscale_api_error` | Headscale HTTP/API failure during bootstrap (may include `http_status`). |
+| `mesh_bootstrap_internal` | Unexpected supervisor-side exception during bootstrap (see server logs). |
+
+Successful bootstrap uses `outputs.mesh.status: "ready"` without a failure `code`.
 
 ### Adapter: `terraform-digitalocean`
 
@@ -582,8 +604,9 @@ plan → apply` in a per-realm workspace under **`DIRIJOR_TERRAFORM_WORKSPACE_RO
 (default: `<temp>/dirijor/terraform-workspaces/<realm_id>/`). The adapter is
 wrapped by **`EgressPolicyRealmAdapter`** (Story 2.3) so a composable policy hook
 runs before `validate` / `provision`. Ready `outputs` include `realm_vpc_id`,
-`realm_vpc_ip_range`, `mesh_endpoint` (`tf://<vpc_id>` placeholder until Story
-5.1), `tf_workspace`, `tf_plan_digest`.
+`realm_vpc_ip_range`, `mesh_endpoint` (`tf://<vpc_id>` **placeholder preserved**
+for backward compatibility; Story 5.1 adds `headscale_control_url` + `mesh`
+when bootstrap is enabled), `tf_workspace`, `tf_plan_digest`.
 
 **Egress posture (Story 2.3):** the copied `terraform/modules/private-realm`
 module applies a DigitalOcean Cloud Firewall with **default-deny outbound to
@@ -654,7 +677,7 @@ Pydantic model: `SpinJob`.
     "agent_count":   3
   },
   "error":          null,
-  "schema_version": 7
+  "schema_version": 8
 }
 ```
 
@@ -705,6 +728,49 @@ for i in $(seq 1 20); do
   sleep 0.2
 done
 ```
+
+---
+
+## `POST /realms/{job_id}/mesh/preauth-key`
+
+**Purpose.** Mint a **single-use** Headscale pre-authentication key for nodes
+joining the realm tailnet. The full key string is returned **only** in this
+response — `GET /realms/{job_id}` never echoes it (avoids log leakage on poll).
+
+**Environment (server-side only):** `DIRIJOR_HEADSCALE_API_URL` (must include
+`/api/v1` path prefix), `DIRIJOR_HEADSCALE_API_KEY` (Bearer token). Optional
+`DIRIJOR_HEADSCALE_PUBLIC_URL` — HTTPS origin shown to operators as
+`outputs.headscale_control_url` (defaults to API URL with `/api/v1` stripped).
+
+| Code | When |
+|---|---|
+| `200` | JSON `preauth_key`, `expires_at`, `schema_version`. |
+| `404` | Unknown `job_id`. |
+| `409` | Mesh not ready, wrong phase, or destroy in progress. |
+| `410` | Key already issued for this job. |
+| `502` | Headscale API error or missing credentials on supervisor. |
+
+**Minimum Headscale version exercised in development:** **0.23.x** API shapes
+(REST `/api/v1/user`, `/api/v1/preauthkey`). Pin your server to match.
+
+---
+
+## `POST /realms/{job_id}/mesh/retry`
+
+**Purpose.** Re-run bootstrap after transient Headscale failures. Idempotent
+user creation (`GET /user?name=` then `POST /user` as needed). Requires the
+same **`DIRIJOR_MESH_BOOTSTRAP_ENABLED`** gate as automatic bootstrap.
+
+| Code | When |
+|---|---|
+| `200` | `{ "status": "accepted", "schema_version": 8 }` — poll `GET` for updated `outputs.mesh`. |
+| `403` | Mesh feature gate off. |
+| `404` | Unknown job. |
+| `409` | Not `phase == ready` or destroy active. |
+
+**Destroy ordering:** if `DELETE /realms/{job_id}` sets `destroy_requested_at`
+while bootstrap runs, in-flight automation stops applying Headscale writes;
+destroy semantics win (see `_run_mesh_bootstrap_after_ready`).
 
 ---
 
@@ -775,7 +841,7 @@ Core remains HTTP POST).
 ```json
 {
   "type": "topology.delta",
-  "schema_version": 7,
+  "schema_version": 8,
   "realm_id": "demo",
   "ts": "2026-04-16T10:12:44.117Z",
   "seq": 3,
@@ -785,7 +851,7 @@ Core remains HTTP POST).
 
 | Field | Type | Notes |
 |---|---|---|
-| `type` | `string` | One of `session.hello`, `topology.delta`, `metrics.update`, `hitl.pending`, `heartbeat`, `session.bye`. |
+| `type` | `string` | One of `session.hello`, `topology.delta`, `metrics.update`, `hitl.pending`, `realm.mesh.state`, `heartbeat`, `session.bye`. |
 | `schema_version` | `int` | Must equal HTTP `SCHEMA_VERSION` at send time. |
 | `realm_id` | `string` | Echo of the path-param realm. |
 | `ts` | ISO-8601 UTC (`Z` suffix) | Server clock. |
@@ -799,6 +865,7 @@ Core remains HTTP POST).
 - `topology.delta` — `payload.agents?: AgentPatch[]`, `payload.edges?: EdgePatch[]`. Each patch carries an `id`; `_tombstone: true` means "remove this id". All other keys are a shallow upsert. Story 4.2 sets agent `status` to `"quarantined"` (and related hints) when policy isolates an agent.
 - `metrics.update` — `payload` is a partial of the canvas `RealmMetrics` shape. Shallow-merged into the store.
 - `hitl.pending` — `payload.action` is a full `CriticalAction`; dedup by `action.id`.
+- `realm.mesh.state` — `payload.job_id`, `payload.status`, `payload.correlation_id`, optional `code` / `message` on failure (Story 5.1). Authoritative enrollment fields remain on `GET /realms/{job_id}.outputs.mesh`.
 - `session.bye` — reserved for a future **server-initiated** graceful shutdown (operator drain, deploy, etc.). v0.1 does not emit it; sessions end with client close or server `1011` / process teardown.
 
 ### Reconnect policy (client-side contract)
@@ -863,7 +930,8 @@ Tests cover:
 - `test_health_ok_when_ready`, `test_health_503_when_required_dep_degraded`, `test_health_never_500s_when_probe_raises`, `test_health_includes_realtime_channel_dep`
 - `test_registry_contains_required_dependencies`
 - `test_consensus_smoke`, `test_consensus_degraded_keeps_v01_key_set`
-- `test_schema_version_pinned`, `test_schema_version_is_7` (fail loudly if someone bumps `SCHEMA_VERSION` without updating this page)
+- `test_schema_version_pinned`, `test_schema_version_is_8` (fail loudly if someone bumps `SCHEMA_VERSION` without updating this page)
+- Story 5.1 mesh: `test_mesh_bootstrap.py` (gate off/on, Headscale `MockTransport`, preauth one-shot, retry, WS broadcast)
 - Story 4.2 safety suite: `test_safety_quarantine.py` (policy load, consensus + signal hooks, HTTP list, realm isolation, `broadcast_event` unknown-type regression)
 - Story 4.3 audit export: `test_audit_export.py` (export gate, half-open filtering, 413 oversize, manifest digests, quarantine audit idempotency, ring eviction log)
 - Story 3.3 WebSocket suite: `test_ws_accepts_valid_realm_id`, `test_ws_rejects_missing_realm_id`, `test_ws_rejects_malformed_realm_id`, `test_ws_rejects_forbidden_realm`, `test_ws_broadcast_reaches_only_matching_realm`, `test_ws_heartbeat_emitted_on_idle`, `test_ws_disconnect_cleans_up_registry`, `test_ws_close_1011_on_send_failure`

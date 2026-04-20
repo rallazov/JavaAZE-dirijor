@@ -128,8 +128,8 @@ Firecracker (Story 5.3 explicit).
 
 **Bindings today (v0.1).**
 
-- `POST /realms/spin` + `DELETE /realms/{job_id}` + `GET /realms/{job_id}` with the `terraform-digitalocean` adapter available when **`DIGITALOCEAN_TOKEN`** and a terraform binary are configured (Story 2.2, 2026-04-18). Story 2.3 (2026-04-19) adds **`EgressPolicyRealmAdapter`** (pre-validate / pre-provision hook → `egress_policy_denied`) and **`terraform/modules/private-realm`** firewall rules with default-deny public Internet egress; optional **`DIRIJOR_ALLOW_PUBLIC_EGRESS`** adds explicit outbound to the Internet in Terraform. Story 5.1 consumes `outputs.mesh_endpoint`.
-- Mesh bootstrap automation: Story 5.1 (consumes `SpinJob.outputs.mesh_endpoint`).
+- `POST /realms/spin` + `DELETE /realms/{job_id}` + `GET /realms/{job_id}` with the `terraform-digitalocean` adapter available when **`DIGITALOCEAN_TOKEN`** and a terraform binary are configured (Story 2.2, 2026-04-18). Story 2.3 (2026-04-19) adds **`EgressPolicyRealmAdapter`** (pre-validate / pre-provision hook → `egress_policy_denied`) and **`terraform/modules/private-realm`** firewall rules with default-deny public Internet egress; optional **`DIRIJOR_ALLOW_PUBLIC_EGRESS`** adds explicit outbound to the Internet in Terraform.
+- Mesh bootstrap automation: **Story 5.1** *(shipped — optional)* — after `phase == ready`, gated by **`DIRIJOR_MESH_BOOTSTRAP_ENABLED`**, Headscale HTTP API (`DIRIJOR_HEADSCALE_API_URL` + `DIRIJOR_HEADSCALE_API_KEY`) ensures a realm-scoped user + tags; **`outputs.mesh`**, **`outputs.headscale_control_url`**, legacy **`mesh_endpoint`** preserved; one-shot **`POST /realms/{job_id}/mesh/preauth-key`**; WebSocket **`realm.mesh.state`**; destroy wins over in-flight bootstrap.
 - Firecracker lifecycle: Story 5.3 (may trail MVP).
 
 ---

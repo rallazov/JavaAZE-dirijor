@@ -120,20 +120,21 @@ permissive system — it has to be part of the default posture.
 
 - **Canvas shell, inspector, HITL UX** — implemented (Epic 1, Stories 1.1–1.6).
 - **Supervisor contract + health/readiness** — implemented (Story 3.1+).
-  `/` and `/health` report `mesh` as `required: false,
-  ready: false, detail: "planned — see Story 5.1"` and `semantic_cache`
-  according to Qdrant configuration — the contract stays honest about
-  what's wired vs optional.
+  `/` and `/health` report `mesh` as `required: false` with `ready: true` when
+  bootstrap is **disabled** (default) or when Headscale URL + API key are set;
+  when bootstrap is **enabled** but credentials are missing, `mesh.ready` is
+  **false** with an explicit `detail`. `semantic_cache` follows Qdrant
+  configuration — the contract stays honest about what's wired vs optional.
 - **Anomaly policy probe + quarantine registry** — Story 4.2 (`anomaly_policy`
   readiness entry; optional `DIRIJOR_ANOMALY_POLICY_PATH`; in-process
   `GET /safety/quarantine/{realm_id}`).
-- **Mesh bootstrap, OpenClaw wrapper, Firecracker lifecycle** — Stories
-  5.1, 5.2, 5.3 in Epic 5 (in progress).
+- **Mesh bootstrap (Headscale API)** — Story 5.1 *(shipped, operator-gated)*;
+  **OpenClaw wrapper egress** — 5.2; **Firecracker lifecycle** — 5.3 (Epic 5).
 - **Default-deny egress policy hooks at provision time** — Story 2.3.
 
-Until Epic 5 lands, "zero-trust by default" is an *architectural
-commitment* visible in every doc, diagram, and readiness probe — not
-yet an end-to-end runtime guarantee. The
+Until Epic 5 is complete (wrapper egress, microVMs), "zero-trust by default"
+is an *architectural commitment* visible in every doc, diagram, and readiness
+probe — mesh enrollment is optional until operators enable it. The
 [supervisor API reference](../../reference/supervisor-api.md) is the
 single place that tells you what's actually running today.
 

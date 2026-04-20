@@ -23,7 +23,9 @@ orphaned cloud resources.
 2. **Subprocess Terraform + injected runner** — the adapter shells out to the `terraform` CLI with an injectable `TerraformRunner` protocol so pytest stays hermetic (no binary, no token, no network on CI).
 3. **Not Pulumi yet** — keep the `RealmAdapter` protocol cloud-agnostic; Pulumi is a future adapter, not a parallel requirement for v0.2.
 4. **Per-realm workspace directories** — isolate `.terraform` state and allow `terraform destroy` via `DELETE /realms/{job_id}` without a global backend.
-5. **Placeholder `mesh_endpoint`** — v0.2 returns `tf://<vpc_id>` until Story 5.1 enrolls the mesh; document honestly in API reference and README.
+5. **Placeholder `mesh_endpoint`** — v0.2 returns `tf://<vpc_id>`; Story 5.1 **adds**
+   `outputs.headscale_control_url` + `outputs.mesh` when mesh bootstrap is enabled
+   but **preserves** `mesh_endpoint` for parsers that still read the placeholder.
 6. **`SCHEMA_VERSION` 3→4** — new DELETE route, new `outputs` keys for destroy lifecycle, and nine new `SpinError.code` values; clients can feature-gate destroy UI.
 
 ## Consequences
