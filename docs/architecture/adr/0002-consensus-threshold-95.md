@@ -8,7 +8,7 @@ Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
 - **Date:** 2026-04-16
 - **Deciders:** Ramin Allazov (JavaAZE)
 - **Related PRD clause:** *"LangGraph-based Dirijor Core supervisor with multi-agent consensus (≥95% agreement) + Verified Semantic Cache."* — [DIRIJOR-PRD.md](../../DIRIJOR-PRD.md)
-- **Related stories:** Story 3.2 (consensus path beyond placeholder), Story 4.1 (verified semantic cache).
+- **Related stories:** Story 3.2 (consensus debate loop), Story 4.1 (verified semantic cache).
 
 ## Context
 

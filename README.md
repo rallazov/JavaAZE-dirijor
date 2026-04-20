@@ -42,7 +42,9 @@ preserved). Story 3.3 added a WebSocket channel for live canvas updates and
 bumped `schema_version` from 2 → 3 (additive — all v2 keys preserved; `GET /`
 gains a `realtime` block and `GET /health` gains a `realtime_channel`
 dependency). Story 4.1 adds verified semantic cache HTTP surfaces and bumps
-`schema_version` to **5** (additive — all prior keys preserved).
+`schema_version` to **5**. Story 4.2 adds optional anomaly policy + quarantine
+HTTP surfaces (`GET /safety/quarantine/...`, gated `POST /safety/signal`) and
+bumps `schema_version` to **6** (additive — all prior keys preserved).
 
 - `GET /` — service identity + aggregate status + per-dependency readiness.
 - `GET /health` — same dependency map, `timestamp`, and HTTP **200** when every
@@ -60,7 +62,7 @@ dependency). Story 4.1 adds verified semantic cache HTTP surfaces and bumps
 {
   "service": "dirijor-supervisor",
   "version": "0.1.0",
-  "schema_version": 5,
+  "schema_version": 6,
   "status": "operational",
   "consensus_engine": "ready",
   "uptime_s": 12.4,
@@ -70,7 +72,13 @@ dependency). Story 4.1 adds verified semantic cache HTTP surfaces and bumps
     "realtime_channel":  { "ready": true,  "required": true,  "detail": null },
     "realm_manager":     { "ready": true,  "required": true,  "detail": null },
     "semantic_cache":    { "ready": false, "required": false, "detail": "not configured" },
+    "anomaly_policy":    { "ready": true,  "required": false, "detail": null },
     "mesh":              { "ready": false, "required": false, "detail": "planned — see Story 5.1" }
+  },
+  "realtime": {
+    "connections": 0,
+    "heartbeat_interval_s": 15.0,
+    "schema_version": 6
   }
 }
 ```
@@ -81,7 +89,7 @@ dependency). Story 4.1 adds verified semantic cache HTTP surfaces and bumps
 {
   "status": "ok",
   "version": "0.1.0",
-  "schema_version": 5,
+  "schema_version": 6,
   "uptime_s": 12.4,
   "timestamp": "2026-04-16T10:12:44.117Z",
   "checks": {
@@ -90,6 +98,7 @@ dependency). Story 4.1 adds verified semantic cache HTTP surfaces and bumps
     "realtime_channel":  { "ready": true,  "required": true,  "detail": null },
     "realm_manager":     { "ready": true,  "required": true,  "detail": null },
     "semantic_cache":    { "ready": false, "required": false, "detail": "not configured" },
+    "anomaly_policy":    { "ready": true,  "required": false, "detail": null },
     "mesh":              { "ready": false, "required": false, "detail": "planned — see Story 5.1" }
   }
 }
@@ -192,14 +201,16 @@ client-side stub so the canvas now reflects real backend state.
   attempts. Close codes `4401` / `4403` are client-fault and do **not**
   retry; `1006` / `1011` and clean `1000` closes do.
 - **Event types:** `session.hello`, `topology.delta`, `metrics.update`,
-  `hitl.pending`, `heartbeat`, `session.bye`. Envelope is
-  `{ v: 1, type, ts, realm_id, connection_id, payload }` with
-  `extra="forbid"` — additive changes will bump `SCHEMA_VERSION`, never
-  rename existing fields.
+  `hitl.pending`, `heartbeat`, `session.bye`. Each server frame is a strict
+  **six-key** JSON object: `type`, `schema_version`, `realm_id`, `ts`,
+  `seq`, `payload` (`RealtimeEnvelope` — `extra="forbid"` on the model).
+  `connection_id` lives **inside** `session.hello.payload`, not on the
+  envelope. Additive payload fields bump documentation and may bump
+  `SCHEMA_VERSION`; top-level envelope keys are fixed until a major bump.
 - **Readiness:** the readiness registry exposes a `realtime_channel`
-  dependency (currently `ready: true, required: false`) and `GET /` returns
-  a `realtime` summary block `{ transport, heartbeat_interval_s,
-  active_connections, active_realms }` for operators.
+  dependency (`required: true` in v0.1). `GET /` includes a `realtime`
+  summary: `{ connections, heartbeat_interval_s, schema_version }` (see
+  `RealtimeSummary` in `supervisor.py`).
 
 Frontend wiring: set `NEXT_PUBLIC_DIRIJOR_WS_URL` to the base URL (e.g.
 `ws://localhost:8000/ws/realm`) before running `npm run dev`; when unset the
@@ -214,7 +225,9 @@ button now round-trips through the supervisor instead of a client-side
 as `/consensus` and `/ws`: closed `SpinError.code` enum, `ConfigDict(extra="forbid")`
 on every Pydantic model, additive-only response shapes. Story 2.2 bumped
 `SCHEMA_VERSION` to `4` (destroy route + SpinError extensions); Story 4.1
-bumped it to `5` (semantic-cache endpoints + consensus cache fields) — see
+bumped it to `5` (semantic-cache endpoints + consensus cache fields); Story
+4.2 bumps it to `6` (Safety Fortress quarantine list + signal hook + optional
+consensus `realm_id`) — see
 [`docs/reference/supervisor-api.md`](docs/reference/supervisor-api.md).
 
 - **`POST /realms/spin`** — enqueue a job. Accepts

@@ -84,6 +84,13 @@ from qdrant_client.models import (
     VectorParams,
 )
 
+from safety_policy import (
+    AnomalyPolicyDocument,
+    load_anomaly_policy_from_path,
+    rule_matches_consensus,
+    rule_matches_signal,
+)
+
 logger = logging.getLogger("dirijor.supervisor")
 
 # --- Service identity (single source of truth) -------------------------------
@@ -112,7 +119,13 @@ SERVICE_VERSION = "0.1.0"
 #     `semantic_cache_limit`, `semantic_cache_threshold`; `verified_facts` on
 #     `/consensus` 200 populated from cache hits; live `semantic_cache`
 #     readiness probe (still `required: false`).
-SCHEMA_VERSION = 5
+#   v6 (Story 4.2, 2026-04-19) — Safety / anomaly quarantine: optional
+#     `realm_id` + `anomaly_subject_agent_id` on `ConsensusRequest`;
+#     `GET /safety/quarantine/{realm_id}`; gated `POST /safety/signal`;
+#     `anomaly_policy` readiness entry (required: false; invalid policy file
+#     degrades this probe only). WebSocket payloads remain existing
+#     `topology.delta` / `hitl.pending` types with additive agent fields.
+SCHEMA_VERSION = 6
 STARTED_AT = time.monotonic()
 STARTUP_GRACE_S = 1.0
 
@@ -284,6 +297,20 @@ class ConsensusRequest(BaseModel):
     semantic_scope_id: str = ""
     semantic_cache_limit: int = Field(default=5, ge=1, le=20)
     semantic_cache_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    realm_id: str | None = None
+    anomaly_subject_agent_id: str | None = Field(default=None, max_length=256)
+
+    @field_validator("realm_id")
+    @classmethod
+    def _consensus_realm_id_optional(cls, v: str | None) -> str | None:
+        if v is None or not str(v).strip():
+            return None
+        s = str(v).strip()
+        if not _REALM_ID_RE.match(s):
+            raise ValueError(
+                "realm_id must match ^[a-zA-Z0-9_-]{1,64}$ when provided"
+            )
+        return s
 
     @field_validator("query_vector")
     @classmethod
@@ -857,6 +884,47 @@ def _build_semantic_cache_backend() -> SemanticCacheBackend:
 
 _SEMANTIC_CACHE: SemanticCacheBackend = _build_semantic_cache_backend()
 
+# --- Anomaly / quarantine (Story 4.2) ----------------------------------------
+#
+# Policy: JSON document via DIRIJOR_ANOMALY_POLICY_PATH; empty env → empty
+# ruleset (local dev needs no file). Invalid file → load error captured in
+# _ANOMALY_POLICY_LOAD_ERROR and exposed via optional `anomaly_policy` readiness
+# (supervisor stays operational for other deps).
+#
+# Quarantine registry: per-realm dict keyed by agent_id (last write wins).
+# Same multi-worker caveat as _SPIN_JOBS — state is per replica until a
+# shared store exists.
+#
+# Dedup: repeated (realm_id, agent_id, rule_id) within QUARANTINE_DEDUPE_WINDOW_S
+# updates the stored evidence but skips extra WebSocket fan-out (idempotent UX).
+
+_ANOMALY_POLICY_PATH = os.environ.get("DIRIJOR_ANOMALY_POLICY_PATH", "").strip()
+_ANOMALY_POLICY_DOC: AnomalyPolicyDocument | None
+_ANOMALY_POLICY_LOAD_ERROR: str | None
+_ANOMALY_POLICY_DOC, _ANOMALY_POLICY_LOAD_ERROR = load_anomaly_policy_from_path(
+    _ANOMALY_POLICY_PATH or None
+)
+_SAFETY_SIGNALS_ENABLED = os.environ.get(
+    "DIRIJOR_SAFETY_SIGNALS_ENABLED", ""
+).strip().lower() in ("1", "true", "yes")
+
+
+@dataclass
+class QuarantineRecord:
+    realm_id: str
+    agent_id: str
+    rule_id: str
+    quarantined_at: str
+    evidence: dict[str, Any]
+
+
+_QUARANTINE_LOCK = asyncio.Lock()
+# Per-realm entries keyed by (agent_id, rule_id) so multiple rules can isolate the
+# same agent without last-write-wins data loss.
+_QUARANTINE_BY_REALM: dict[str, dict[tuple[str, str], QuarantineRecord]] = {}
+_QUARANTINE_DEDUPE_LAST: dict[tuple[str, str, str], float] = {}
+QUARANTINE_DEDUPE_WINDOW_S = 30.0
+
 
 def _log_semantic_cache_miss(reason: str, **extra: Any) -> None:
     logger.info(
@@ -913,6 +981,12 @@ def _probe_semantic_cache() -> tuple[bool, str | None]:
         return False, msg
 
 
+def _probe_anomaly_policy() -> tuple[bool, str | None]:
+    if _ANOMALY_POLICY_LOAD_ERROR:
+        return False, _ANOMALY_POLICY_LOAD_ERROR
+    return True, None
+
+
 def _probe_mesh() -> tuple[bool, str | None]:
     # Headscale/Tailscale bootstrap lands in Story 5.1.
     return False, "planned — see Story 5.1"
@@ -956,6 +1030,7 @@ REGISTRY: list[DependencyCheck] = [
     DependencyCheck("realtime_channel", True, _probe_realtime_channel),
     DependencyCheck("realm_manager", True, _probe_realm_manager),
     DependencyCheck("semantic_cache", False, _probe_semantic_cache),
+    DependencyCheck("anomaly_policy", False, _probe_anomaly_policy),
     DependencyCheck("mesh", False, _probe_mesh),
 ]
 
@@ -1264,6 +1339,178 @@ def _assign_default_agent_ids(opinions: list[AgentOpinion]) -> list[AgentOpinion
     return out
 
 
+class QuarantineListItem(BaseModel):
+    """One row from `GET /safety/quarantine/{realm_id}`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    realm_id: str
+    agent_id: str
+    rule_id: str
+    quarantined_at: str
+    evidence: dict[str, Any]
+
+
+class QuarantineListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[QuarantineListItem]
+    schema_version: int
+
+
+class SafetySignalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    realm_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
+    agent_id: str = Field(min_length=1, max_length=256)
+    signal_type: str = Field(min_length=1, max_length=128)
+    tool_name: str | None = Field(default=None, max_length=512)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+async def _record_quarantine_and_broadcast(
+    *,
+    realm_id: str,
+    agent_id: str,
+    rule_id: str,
+    rule_description: str,
+    evidence: dict[str, Any],
+    safety_score_hint: float,
+    label_hint: str | None,
+) -> None:
+    """Persist quarantine state and fan-out topology + HITL frames."""
+
+    now_wall = _iso_now()
+    key = (realm_id, agent_id, rule_id)
+    now_mono = time.monotonic()
+    emit_ws: bool
+    async with _QUARANTINE_LOCK:
+        prev = _QUARANTINE_DEDUPE_LAST.get(key)
+        emit_ws = prev is None or (now_mono - prev) >= QUARANTINE_DEDUPE_WINDOW_S
+        if emit_ws:
+            _QUARANTINE_DEDUPE_LAST[key] = now_mono
+
+        bucket = _QUARANTINE_BY_REALM.setdefault(realm_id, {})
+        rec_key = (agent_id, rule_id)
+        existing = bucket.get(rec_key)
+        merged_evidence = {**(existing.evidence if existing else {}), **evidence}
+        quarantined_at = (
+            now_wall
+            if emit_ws
+            else (existing.quarantined_at if existing else now_wall)
+        )
+        bucket[rec_key] = QuarantineRecord(
+            realm_id=realm_id,
+            agent_id=agent_id,
+            rule_id=rule_id,
+            quarantined_at=quarantined_at,
+            evidence=merged_evidence,
+        )
+
+    if not emit_ws:
+        return
+
+    label = (label_hint or agent_id).strip() or agent_id
+    topo_payload = {
+        "agents": [
+            {
+                "id": agent_id,
+                "status": "quarantined",
+                "safetyScore": max(0.0, min(1.0, float(safety_score_hint))),
+                "label": label,
+                "signaturePreview": f"quarantine:{rule_id}",
+            }
+        ]
+    }
+    await broadcast_event(realm_id, "topology.delta", topo_payload)
+
+    hitl_id = f"quarantine:{realm_id}:{agent_id}:{rule_id}"
+    detail = (
+        rule_description.strip()
+        if rule_description.strip()
+        else f"Rule {rule_id} triggered (automatic quarantine)."
+    )
+    await broadcast_event(
+        realm_id,
+        "hitl.pending",
+        {
+            "action": {
+                "id": hitl_id,
+                "title": f"Quarantined — {rule_id}",
+                "detail": detail,
+                "requestedAt": now_wall,
+                "safetyScore": max(0.0, min(1.0, float(safety_score_hint))),
+            }
+        },
+    )
+
+
+async def _run_anomaly_after_consensus(
+    req: ConsensusRequest,
+    payload: ConsensusResult,
+    opinions: list[AgentOpinion],
+) -> None:
+    if not req.realm_id or _ANOMALY_POLICY_DOC is None:
+        return
+    subject = (req.anomaly_subject_agent_id or "").strip()
+    if not subject:
+        subject = opinions[0].agent_id if opinions else "consensus"
+    for rule in _ANOMALY_POLICY_DOC.rules:
+        if rule.action != "quarantine":
+            continue
+        if not rule_matches_consensus(
+            rule,
+            consensus_score=payload.consensus_score,
+            termination_reason=payload.termination_reason,
+        ):
+            continue
+        ev = {
+            "source": "consensus",
+            "consensus_score": payload.consensus_score,
+            "termination_reason": payload.termination_reason,
+            "rule_id": rule.id,
+        }
+        await _record_quarantine_and_broadcast(
+            realm_id=req.realm_id,
+            agent_id=subject,
+            rule_id=rule.id,
+            rule_description=rule.description,
+            evidence=ev,
+            safety_score_hint=payload.consensus_score,
+            label_hint=subject,
+        )
+
+
+async def _run_anomaly_for_signal(req: SafetySignalRequest) -> None:
+    if _ANOMALY_POLICY_DOC is None:
+        return
+    for rule in _ANOMALY_POLICY_DOC.rules:
+        if rule.action != "quarantine":
+            continue
+        if not rule_matches_signal(
+            rule,
+            signal_type=req.signal_type,
+            tool_name=req.tool_name,
+        ):
+            continue
+        ev = {
+            **req.evidence,
+            "source": "signal",
+            "signal_type": req.signal_type,
+            "tool_name": req.tool_name,
+            "rule_id": rule.id,
+        }
+        await _record_quarantine_and_broadcast(
+            realm_id=req.realm_id,
+            agent_id=req.agent_id,
+            rule_id=rule.id,
+            rule_description=rule.description,
+            evidence=ev,
+            safety_score_hint=0.15,
+            label_hint=req.agent_id,
+        )
+
+
 @app.post(
     "/consensus",
     response_model=ConsensusResult,
@@ -1396,6 +1643,8 @@ async def run_consensus(
             "semantic_cache_reason": payload.semantic_cache_reason,
         },
     )
+
+    await _run_anomaly_after_consensus(req, payload, opinions)
 
     return payload
 
@@ -2621,6 +2870,62 @@ def _spin_error_response(
     return JSONResponse(status_code=status_code, content=payload)
 
 
+@app.get(
+    "/safety/quarantine/{realm_id}",
+    response_model=QuarantineListResponse,
+    responses={
+        400: {"model": SpinError, "description": "Invalid realm_id grammar."},
+    },
+)
+async def list_quarantined_agents(realm_id: str) -> QuarantineListResponse | JSONResponse:
+    if not _REALM_ID_RE.match(realm_id or ""):
+        return _spin_error_response(
+            400,
+            "invalid_realm_id",
+            "realm_id must match ^[a-zA-Z0-9_-]{1,64}$",
+        )
+    async with _QUARANTINE_LOCK:
+        bucket = _QUARANTINE_BY_REALM.get(realm_id, {})
+        items = [
+            QuarantineListItem(
+                realm_id=rec.realm_id,
+                agent_id=rec.agent_id,
+                rule_id=rec.rule_id,
+                quarantined_at=rec.quarantined_at,
+                evidence=rec.evidence,
+            )
+            for rec in bucket.values()
+        ]
+    return QuarantineListResponse(items=items, schema_version=SCHEMA_VERSION)
+
+
+@app.post(
+    "/safety/signal",
+    responses={
+        400: {"model": SpinError},
+        403: {"model": SpinError},
+    },
+)
+async def ingest_safety_signal(
+    req: SafetySignalRequest,
+) -> JSONResponse:
+    """Synthetic anomaly signal (tests / private demos).
+
+    Disabled unless ``DIRIJOR_SAFETY_SIGNALS_ENABLED`` is truthy — production
+    docs default this off so the route is not externally reachable in hardened
+    deployments.
+    """
+    if not _SAFETY_SIGNALS_ENABLED:
+        return _spin_error_response(
+            403,
+            "validation_failed",
+            "POST /safety/signal is disabled; set DIRIJOR_SAFETY_SIGNALS_ENABLED=1 to enable",
+            {"feature": "safety_signals"},
+        )
+    await _run_anomaly_for_signal(req)
+    return Response(status_code=204)
+
+
 @app.post(
     "/realms/spin",
     response_model=SpinResponse,
@@ -2938,10 +3243,9 @@ async def _spin_validation_exception_handler(
 # — all outbound frames MUST go through the shared envelope / error path so
 # logging, eviction, and `seq` monotonicity stay consistent.
 #
-# TODO(refactor): supervisor.py > 2000 lines post-Story 2.2; split into
-# consensus.py + realtime.py + spin.py + terraform_adapter.py when Story 4.2
-# or 6.1 land. Do NOT pre-split — a refactor mid-story adds risk; the split
-# is a dedicated follow-up.
+# TODO(4.3-split): supervisor.py is oversized; split into consensus.py +
+# realtime.py + spin.py + safety.py when a dedicated refactor story lands
+# (deferred from Story 4.2 — mid-story split adds risk).
 
 
 class RealtimeEnvelope(BaseModel):
