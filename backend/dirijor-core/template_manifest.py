@@ -15,7 +15,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
@@ -87,6 +87,12 @@ class ManifestPinsV1(BaseModel):
     )
     adapter_hint: str | None = None
 
+    @field_validator("supervisor_schema_version")
+    @classmethod
+    def _supervisor_schema_version_semver(cls, v: str) -> str:
+        _semver_triple(v)
+        return v
+
 
 class ManifestSignatureV1(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -124,6 +130,16 @@ class TemplateManifestDocumentV1(BaseModel):
     def _template_version_semver(cls, v: str) -> str:
         _semver_triple(v)
         return v
+
+
+def _json_object_pairs_no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """``json.loads`` hook: reject duplicate keys (stdlib default last-key-wins)."""
+    out: dict[str, Any] = {}
+    for key, val in pairs:
+        if key in out:
+            raise json.JSONDecodeError(f"duplicate object key {key!r}", "", 0)
+        out[key] = val
+    return out
 
 
 def canonical_json_bytes(obj: Any) -> bytes:
@@ -186,10 +202,7 @@ def _verify_pins(
     pin_bindings: dict[str, str] | None,
 ) -> str | None:
     pins = doc.pins
-    try:
-        min_sv = _semver_triple(pins.supervisor_schema_version)
-    except ValueError as e:
-        return str(e)
+    min_sv = _semver_triple(pins.supervisor_schema_version)
     core_sv = (effective_supervisor_schema_version, 0, 0)
     if not _semver_ge(core_sv, min_sv):
         return (
@@ -219,7 +232,7 @@ def verify_template_manifest(
 ) -> TemplateManifestVerifyResult:
     """Parse, schema-validate, verify signatures, then verify pins.
 
-    * **PARSE** — invalid UTF-8 or JSON.
+    * **PARSE** — invalid UTF-8, invalid JSON, or duplicate JSON object keys.
     * **SCHEMA** — Pydantic validation (including ``extra`` keys at parse time via JSON).
     * **SIGNATURE** — missing/invalid HMAC, unsupported algorithm, or tamper.
     * **PINS** — supervisor semver floor or exact-string pin mismatch.
@@ -233,7 +246,7 @@ def verify_template_manifest(
         return TemplateManifestVerifyFailure(code="PARSE", detail=str(e))
 
     try:
-        data = json.loads(text)
+        data = json.loads(text, object_pairs_hook=_json_object_pairs_no_duplicates)
     except json.JSONDecodeError as e:
         return TemplateManifestVerifyFailure(code="PARSE", detail=str(e))
 

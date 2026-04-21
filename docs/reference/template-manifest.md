@@ -64,6 +64,7 @@ See **Pin semantics** below.
 ### `pins.supervisor_schema_version`
 
 - Type: semver string `major.minor.patch`.
+- **Format:** strings that are not `major.minor.patch` fail at **model validation** with code **`SCHEMA`** (before pin-floor checks).
 - Meaning: **minimum** Core HTTP contract floor: the supervisor’s integer `SCHEMA_VERSION` (see `supervisor.py`) is mapped to semver as **`N.0.0`** (e.g. `8` → `8.0.0`).
 - Verification compares using semver ordering: Core is **too old** if `N.0.0` is **strictly below** the manifest minimum → verification fails with code **`PINS`**.
 
@@ -103,7 +104,7 @@ verify_template_manifest(raw: bytes, *, effective_supervisor_schema_version: int
 
 | Code | Meaning |
 |------|---------|
-| `PARSE` | Invalid UTF-8 or invalid JSON. |
+| `PARSE` | Invalid UTF-8, invalid JSON, or **duplicate object keys** (strict parse rejects duplicate keys). |
 | `SCHEMA` | Pydantic validation failed (including unknown keys). |
 | `SIGNATURE` | Missing/invalid key, wrong MAC, tamper, or unsupported algorithm. |
 | `PINS` | Supervisor semver floor failure or exact-string pin mismatch. |

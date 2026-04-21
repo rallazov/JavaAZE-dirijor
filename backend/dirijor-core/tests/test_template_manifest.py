@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
 import supervisor
 import template_manifest as tm
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_COMMITTED_TEMPLATE_SCHEMA = _REPO_ROOT / "docs" / "reference" / "schemas" / "dirijor.template_manifest.v1.json"
 
 
 def _base_document() -> tm.TemplateManifestDocumentV1:
@@ -67,6 +71,30 @@ def test_schema_rejects_extra_top_level_key():
     )
     assert isinstance(res, tm.TemplateManifestVerifyFailure)
     assert res.code == "SCHEMA"
+
+
+def test_schema_rejects_invalid_pins_supervisor_semver(monkeypatch):
+    monkeypatch.setenv("DIRIJOR_TEMPLATE_MANIFEST_HMAC_KEY", "unit-test-hmac-key")
+    d = _base_document().model_dump(mode="json")
+    d["pins"]["supervisor_schema_version"] = "not-a-semver"
+    raw = json.dumps(d).encode("utf-8")
+    res = tm.verify_template_manifest(
+        raw,
+        effective_supervisor_schema_version=supervisor.SCHEMA_VERSION,
+        pin_bindings={"adapter_hint": "terraform-digitalocean"},
+    )
+    assert isinstance(res, tm.TemplateManifestVerifyFailure)
+    assert res.code == "SCHEMA"
+
+
+def test_parse_rejects_duplicate_json_keys():
+    raw = b'{"x": 1, "x": 2}'
+    res = tm.verify_template_manifest(
+        raw,
+        effective_supervisor_schema_version=supervisor.SCHEMA_VERSION,
+    )
+    assert isinstance(res, tm.TemplateManifestVerifyFailure)
+    assert res.code == "PARSE"
 
 
 def test_signature_failure_on_tamper(monkeypatch):
@@ -145,7 +173,8 @@ def test_explicit_none_signature_without_hmac_env(monkeypatch):
 
 
 def test_json_schema_export_matches_snapshot():
-    schema = tm.template_manifest_v1_json_schema()
-    assert schema["title"] == "TemplateManifestDocumentV1"
-    assert "manifest_schema" in json.dumps(schema)
+    assert _COMMITTED_TEMPLATE_SCHEMA.is_file(), f"missing {_COMMITTED_TEMPLATE_SCHEMA}"
+    committed = json.loads(_COMMITTED_TEMPLATE_SCHEMA.read_text(encoding="utf-8"))
+    generated = tm.template_manifest_v1_json_schema()
+    assert committed == generated
 
