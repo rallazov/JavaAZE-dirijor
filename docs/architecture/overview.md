@@ -198,12 +198,24 @@ bolt-on, they rot.
 
 ---
 
-## Cross-cutting: Marketplace _(deferred)_
+## Cross-cutting: Marketplace
 
-Epic 7 (Stories 7.1, 7.2) adds signed swarm templates and a one-click
-import path. Deliberately sequenced *after* provisioning, safety, and
-observability because a marketplace that imports into an unsafe plane
-is a liability, not a feature.
+Epic 7 adds swarm **template manifests** and (in Story 7.2) a one-click import
+into provisioning. The sequence stays *after* provisioning, safety, and
+observability because a marketplace that imports into an unsafe plane is a
+liability, not a feature.
+
+**After Story 7.1:** Core exposes a **versioned manifest schema**
+(`dirijor.template_manifest.v1`), **canonical UTF-8 JSON** signing semantics,
+and `verify_template_manifest` with a closed error taxonomy (`PARSE` /
+`SCHEMA` / `SIGNATURE` / `PINS`). Pydantic models are the source of truth; a
+derived JSON Schema lives under `docs/reference/schemas/`. Full detail:
+[`docs/reference/template-manifest.md`](../reference/template-manifest.md).
+
+**Story 7.2** (backlog / scheduled separately) wires **import → realm draft**
+using **only** manifests that verify successfully — no automatic apply of
+templates to Terraform in 7.1; manifests describe intent, policy references,
+and pins.
 
 ---
 

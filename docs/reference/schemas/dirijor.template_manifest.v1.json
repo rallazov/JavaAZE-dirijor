@@ -1,0 +1,210 @@
+{
+  "$defs": {
+    "AgentSlotV1": {
+      "additionalProperties": false,
+      "properties": {
+        "agent_id": {
+          "minLength": 1,
+          "title": "Agent Id",
+          "type": "string"
+        },
+        "role": {
+          "minLength": 1,
+          "title": "Role",
+          "type": "string"
+        },
+        "runtime_hint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Runtime Hint"
+        },
+        "tooling_hint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tooling Hint"
+        }
+      },
+      "required": [
+        "agent_id",
+        "role"
+      ],
+      "title": "AgentSlotV1",
+      "type": "object"
+    },
+    "ManifestPinsV1": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter_hint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Adapter Hint"
+        },
+        "supervisor_schema_version": {
+          "description": "Minimum Core SCHEMA_VERSION as semver (major.minor.patch).",
+          "title": "Supervisor Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "supervisor_schema_version"
+      ],
+      "title": "ManifestPinsV1",
+      "type": "object"
+    },
+    "ManifestSignatureV1": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "enum": [
+            "hmac-sha256",
+            "ed25519",
+            "none"
+          ],
+          "title": "Algorithm",
+          "type": "string"
+        },
+        "key_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Key Id"
+        },
+        "value": {
+          "default": "",
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "algorithm"
+      ],
+      "title": "ManifestSignatureV1",
+      "type": "object"
+    },
+    "PolicyRefV1": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "egress_policy",
+            "hitl_policy",
+            "tool_policy"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "uri": {
+          "minLength": 1,
+          "title": "Uri",
+          "type": "string"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        }
+      },
+      "required": [
+        "kind",
+        "uri"
+      ],
+      "title": "PolicyRefV1",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Wire document including embedded ``signatures`` (single-file artifact).",
+  "properties": {
+    "agents": {
+      "items": {
+        "$ref": "#/$defs/AgentSlotV1"
+      },
+      "minItems": 1,
+      "title": "Agents",
+      "type": "array"
+    },
+    "created_at": {
+      "title": "Created At",
+      "type": "string"
+    },
+    "manifest_schema": {
+      "const": "dirijor.template_manifest.v1",
+      "title": "Manifest Schema",
+      "type": "string"
+    },
+    "pins": {
+      "$ref": "#/$defs/ManifestPinsV1"
+    },
+    "policy_refs": {
+      "items": {
+        "$ref": "#/$defs/PolicyRefV1"
+      },
+      "title": "Policy Refs",
+      "type": "array"
+    },
+    "signatures": {
+      "items": {
+        "$ref": "#/$defs/ManifestSignatureV1"
+      },
+      "minItems": 1,
+      "title": "Signatures",
+      "type": "array"
+    },
+    "template_id": {
+      "minLength": 1,
+      "title": "Template Id",
+      "type": "string"
+    },
+    "template_version": {
+      "minLength": 1,
+      "title": "Template Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "template_id",
+    "template_version",
+    "manifest_schema",
+    "created_at",
+    "agents",
+    "policy_refs",
+    "pins",
+    "signatures"
+  ],
+  "title": "TemplateManifestDocumentV1",
+  "type": "object"
+}
