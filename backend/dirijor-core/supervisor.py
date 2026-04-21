@@ -68,6 +68,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Protocol, Self, Sequence, TypedDict, get_args
 
 from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
@@ -1193,6 +1194,29 @@ class HealthStatus(BaseModel):
 # --- FastAPI Server ----------------------------------------------------------
 
 app = FastAPI(title="Dirijor Supervisor", version=SERVICE_VERSION)
+
+# Browser canvas (Next.js) calls Core from another origin (e.g. :3001 → :8000).
+# Without CORS, `fetch` fails closed and the UI surfaces `network_error`.
+# Override with DIRIJOR_CORS_ORIGINS=comma,separated,origins for deployments.
+def _cors_allow_origins() -> list[str]:
+    raw = os.environ.get("DIRIJOR_CORS_ORIGINS", "").strip()
+    if raw:
+        return [o.strip() for o in raw.split(",") if o.strip()]
+    return [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
+    ]
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_allow_origins(),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 otel_lib.setup_core_observability(
     app,
