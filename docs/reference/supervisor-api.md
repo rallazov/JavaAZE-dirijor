@@ -30,11 +30,11 @@ v0.1 supervisor exposes — no opinions, no recommendations. For the
 | Field | Value | Meaning |
 |---|---|---|
 | `SERVICE_VERSION` | `"0.1.0"` | Module constant; `FastAPI(version=...)` and every response read this. |
-| `SCHEMA_VERSION` | `8` | Contract shape version. Story 5.1 bumped 7→8: gated mesh bootstrap after `phase == ready` (`DIRIJOR_MESH_BOOTSTRAP_ENABLED` truthy like `DIRIJOR_AUDIT_EXPORT_ENABLED` / `DIRIJOR_SAFETY_SIGNALS_ENABLED`: `1` / `true` / `yes`); additive `outputs.mesh`, `outputs.headscale_control_url`; `POST /realms/{job_id}/mesh/preauth-key` (one-shot secret, not echoed on `GET` poll); `POST /realms/{job_id}/mesh/retry`; WebSocket `realm.mesh.state`; `SpinError` codes `mesh_bootstrap_disabled`, `mesh_preauth_consumed`, `mesh_preauth_not_eligible`, `mesh_headscale_api_error`, `mesh_retry_conflict`. Story 4.3 bumped 6→7: gated `POST /audit/export` (ZIP audit bundle); realm-scoped in-memory audit ring; new `SpinError` codes `audit_export_disabled`, `audit_export_too_large`, `audit_export_invalid_window`. Story 4.2 bumped 5→6: optional `realm_id` / `anomaly_subject_agent_id` on `POST /consensus`; `GET /safety/quarantine/{realm_id}`; gated `POST /safety/signal`; optional `anomaly_policy` readiness entry; WebSocket payloads remain existing `topology.delta` / `hitl.pending` types (additive agent fields such as `status: "quarantined"`). Story 4.1 bumped 4→5: semantic-cache HTTP + consensus cache fields + `semantic_cache` probe. Story 2.2 bumped 3→4 (`DELETE /realms/{job_id}` + destroy-related `outputs` keys + nine new `SpinError.code` values). Story 3.2 bumped 1→2 (debate loop), Story 3.3 bumped 2→3 (WebSocket channel + `realtime` block). Story 2.1 added the `realm_manager` readiness-registry dep without bumping — precedent for "dep-only additive" extensions. Story 2.3 added **`egress_policy_denied`** and Terraform egress controls **without** bumping `SCHEMA_VERSION` (env- and module-driven only). |
+| `SCHEMA_VERSION` | `9` | Contract shape version. **Story 7.2** bumped 8→9: `POST /marketplace/templates/import-draft` returns `{ schema_version, draft }` on success or `{ schema_version, code, detail }` on `422` (`PARSE` / `SCHEMA` / `SIGNATURE` / `PINS` / `draft_agent_count_exceeded` — **not** a `SpinError` envelope). Story 5.1 bumped 7→8: gated mesh bootstrap after `phase == ready` (`DIRIJOR_MESH_BOOTSTRAP_ENABLED` truthy like `DIRIJOR_AUDIT_EXPORT_ENABLED` / `DIRIJOR_SAFETY_SIGNALS_ENABLED`: `1` / `true` / `yes`); additive `outputs.mesh`, `outputs.headscale_control_url`; `POST /realms/{job_id}/mesh/preauth-key` (one-shot secret, not echoed on `GET` poll); `POST /realms/{job_id}/mesh/retry`; WebSocket `realm.mesh.state`; `SpinError` codes `mesh_bootstrap_disabled`, `mesh_preauth_consumed`, `mesh_preauth_not_eligible`, `mesh_headscale_api_error`, `mesh_retry_conflict`. Story 4.3 bumped 6→7: gated `POST /audit/export` (ZIP audit bundle); realm-scoped in-memory audit ring; new `SpinError` codes `audit_export_disabled`, `audit_export_too_large`, `audit_export_invalid_window`. Story 4.2 bumped 5→6: optional `realm_id` / `anomaly_subject_agent_id` on `POST /consensus`; `GET /safety/quarantine/{realm_id}`; gated `POST /safety/signal`; optional `anomaly_policy` readiness entry; WebSocket payloads remain existing `topology.delta` / `hitl.pending` types (additive agent fields such as `status: "quarantined"`). Story 4.1 bumped 4→5: semantic-cache HTTP + consensus cache fields + `semantic_cache` probe. Story 2.2 bumped 3→4 (`DELETE /realms/{job_id}` + destroy-related `outputs` keys + nine new `SpinError.code` values). Story 3.2 bumped 1→2 (debate loop), Story 3.3 bumped 2→3 (WebSocket channel + `realtime` block). Story 2.1 added the `realm_manager` readiness-registry dep without bumping — precedent for "dep-only additive" extensions. Story 2.3 added **`egress_policy_denied`** and Terraform egress controls **without** bumping `SCHEMA_VERSION` (env- and module-driven only). |
 
-### Marketplace / template manifest (library — Story 7.1)
+### Marketplace / template manifest (Story 7.1 library + Story 7.2 HTTP)
 
-Swarm template manifests (`dirijor.template_manifest.v1`) are validated in-process by `verify_template_manifest` in `backend/dirijor-core/template_manifest.py`. There is **no** new HTTP route for templates in Story 7.1; a future story may add read-only marketplace endpoints under a **`SCHEMA_VERSION` bump** if the JSON contract needs to surface on the wire.
+Swarm template manifests (`dirijor.template_manifest.v1`) are validated in-process by `verify_template_manifest` in `backend/dirijor-core/template_manifest.py`. **Story 7.2** adds **`POST /marketplace/templates/import-draft`** (body = raw UTF-8 JSON bytes of one manifest object) which calls that verifier and maps a successful document to operator-editable spin draft fields (`agent_count`, `realm_description`, optional `adapter_hint`, read-only `policy_refs`). Provisioning still uses **`POST /realms/spin`** only.
 
 Authoritative detail, canonical JSON signing, error codes (`PARSE` / `SCHEMA` / `SIGNATURE` / `PINS`), and derived JSON Schema: [`template-manifest.md`](template-manifest.md).
 
@@ -47,6 +47,7 @@ Authoritative detail, canonical JSON signing, error codes (`PARSE` / `SCHEMA` / 
 | `POST` | `/consensus`                  | Multi-agent debate loop (Story 3.2 — real, configurable threshold) + optional semantic cache (Story 4.1) | `200` / `503` (if graph unavailable) |
 | `POST` | `/semantic-cache/ingest`      | Ingest a verified fact with caller-provided embedding (Story 4.1, Qdrant) | `200` / `400` / `503` |
 | `POST` | `/semantic-cache/query`       | Similarity query within a `scope_id` (Story 4.1)                        | `200` / `400` / `503` |
+| `POST` | `/marketplace/templates/import-draft` | Verify manifest + return realm spin draft (Story 7.2 — not `SpinError`) | `200` / `422` |
 | `POST` | `/realms/spin`                | Enqueue a realm provisioning job (Story 2.1 — adapter-backed, async)  | `202` / `400` / `409` / `503` |
 | `GET`  | `/realms/{job_id}`            | Poll spin job state (Story 2.1 — `validating → provisioning → ready \| failed`) | `200` / `404` |
 | `POST` | `/realms/{job_id}/mesh/preauth-key` | Mint one Headscale preauth key per job (Story 5.1 — secret not stored on poll body) | `200` / `404` / `409` / `410` / `502` |
@@ -107,7 +108,7 @@ Pydantic model: `RootStatus`.
 {
   "service": "dirijor-supervisor",
   "version": "0.1.0",
-  "schema_version": 8,
+  "schema_version": 9,
   "status": "operational",
   "consensus_engine": "ready",
   "uptime_s": 12.4,
@@ -123,7 +124,7 @@ Pydantic model: `RootStatus`.
   "realtime": {
     "connections": 0,
     "heartbeat_interval_s": 15.0,
-    "schema_version": 8
+    "schema_version": 9
   }
 }
 ```
@@ -157,7 +158,7 @@ Pydantic model: `HealthStatus`.
 {
   "status": "ok",
   "version": "0.1.0",
-  "schema_version": 8,
+  "schema_version": 9,
   "uptime_s": 12.4,
   "timestamp": "2026-04-16T10:12:44.117Z",
   "checks": {
@@ -183,7 +184,7 @@ status code and `status` field differ.
 {
   "status": "degraded",
   "version": "0.1.0",
-  "schema_version": 8,
+  "schema_version": 9,
   "uptime_s": 342.0,
   "timestamp": "2026-04-16T10:18:02.554Z",
   "checks": {
@@ -484,6 +485,63 @@ unzip -l audit-bundle.zip
 
 ---
 
+## `POST /marketplace/templates/import-draft`
+
+**Purpose.** Upload a single `dirijor.template_manifest.v1` document as **raw UTF-8 JSON** (same bytes as `verify_template_manifest` in Core — duplicate object keys are rejected). On success, returns a **realm draft** for the operator to edit before calling `POST /realms/spin`. Shipped by **Story 7.2** (2026-04-20).
+
+**Environment (optional pin binding).** If manifests set `pins.adapter_hint`, verification requires `DIRIJOR_TEMPLATE_MANIFEST_PIN_ADAPTER_HINT` to match (see Story 7.1 pins). HMAC verification uses `DIRIJOR_TEMPLATE_MANIFEST_HMAC_KEY` when signatures are not `algorithm: "none"`.
+
+### Request
+
+- **Content-Type:** `application/json`
+- **Body:** one JSON object (the manifest file contents — not double-wrapped).
+
+### Response `200 OK`
+
+```json
+{
+  "schema_version": 9,
+  "draft": {
+    "agent_count": 3,
+    "realm_description": "Imported template: my-tpl @ 1.0.0",
+    "adapter_hint": "terraform-digitalocean",
+    "policy_refs": [
+      {
+        "kind": "egress_policy",
+        "uri": "https://registry.example.invalid/policies/egress/default-deny-v1",
+        "version": "1.0.0"
+      }
+    ]
+  }
+}
+```
+
+`policy_refs` are **read-only** visibility for operators; Story 7.2 does not apply them to Terraform.
+
+### Response `422 Unprocessable Entity`
+
+Same envelope for verification failures and draft rules:
+
+```json
+{
+  "schema_version": 9,
+  "code": "SCHEMA",
+  "detail": "…"
+}
+```
+
+- `code` ∈ `PARSE` \| `SCHEMA` \| `SIGNATURE` \| `PINS` (from `verify_template_manifest`), or **`draft_agent_count_exceeded`** when the manifest lists more than **50** agents (after verification succeeds).
+
+### Example (`curl`)
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/marketplace/templates/import-draft \
+  -H 'Content-Type: application/json' \
+  --data-binary @manifest.json
+```
+
+---
+
 ## `POST /realms/spin`
 
 **Purpose.** Enqueue a realm provisioning job. Shipped by **Story 2.1**
@@ -683,7 +741,7 @@ Pydantic model: `SpinJob`.
     "agent_count":   3
   },
   "error":          null,
-  "schema_version": 8
+  "schema_version": 9
 }
 ```
 
@@ -769,7 +827,7 @@ same **`DIRIJOR_MESH_BOOTSTRAP_ENABLED`** gate as automatic bootstrap.
 
 | Code | When |
 |---|---|
-| `200` | `{ "status": "accepted", "schema_version": 8 }` — poll `GET` for updated `outputs.mesh`. |
+| `200` | `{ "status": "accepted", "schema_version": 9 }` — poll `GET` for updated `outputs.mesh`. |
 | `403` | Mesh feature gate off. |
 | `404` | Unknown job. |
 | `409` | Not `phase == ready` or destroy active. |
@@ -847,7 +905,7 @@ Core remains HTTP POST).
 ```json
 {
   "type": "topology.delta",
-  "schema_version": 8,
+  "schema_version": 9,
   "realm_id": "demo",
   "ts": "2026-04-16T10:12:44.117Z",
   "seq": 3,
@@ -941,7 +999,7 @@ Tests cover:
 - `test_health_ok_when_ready`, `test_health_503_when_required_dep_degraded`, `test_health_never_500s_when_probe_raises`, `test_health_includes_realtime_channel_dep`
 - `test_registry_contains_required_dependencies`
 - `test_consensus_smoke`, `test_consensus_degraded_keeps_v01_key_set`
-- `test_schema_version_pinned`, `test_schema_version_is_8` (fail loudly if someone bumps `SCHEMA_VERSION` without updating this page)
+- `test_schema_version_pinned`, `test_schema_version_is_9` (fail loudly if someone bumps `SCHEMA_VERSION` without updating this page)
 - Story 5.1 mesh: `test_mesh_bootstrap.py` (gate off/on, Headscale `MockTransport`, preauth one-shot, retry, WS broadcast)
 - Story 4.2 safety suite: `test_safety_quarantine.py` (policy load, consensus + signal hooks, HTTP list, realm isolation, `broadcast_event` unknown-type regression)
 - Story 4.3 audit export: `test_audit_export.py` (export gate, half-open filtering, 413 oversize, manifest digests, quarantine audit idempotency, ring eviction log)

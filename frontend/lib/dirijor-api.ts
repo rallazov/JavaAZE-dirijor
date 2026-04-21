@@ -36,6 +36,7 @@
  * both surfaces converge on one closed enum.
  */
 
+import type { MarketplaceImportDraftSuccess } from '@/types/marketplace';
 import type { SpinJob, SpinPhase, SpinRequest, SpinResponse } from '@/types/spin';
 
 /** Runtime mirror of the closed `SpinPhase` union. Kept as a `const`
@@ -303,4 +304,99 @@ export async function deleteRealmJob(
     return parsed;
   }
   throw parseErrorBody(parsed, status);
+}
+
+/** Story 7.2 — failures on `POST /marketplace/templates/import-draft`.
+ *  Uses Core `{ code, detail }` (not `SpinError`). */
+export class ImportDraftApiError extends Error {
+  readonly code: string;
+  readonly httpStatus: number;
+  readonly schemaVersion: number;
+  readonly detail: string;
+
+  constructor(
+    code: string,
+    detail: string,
+    httpStatus: number,
+    schemaVersion: number
+  ) {
+    super(detail);
+    this.name = 'ImportDraftApiError';
+    this.code = code;
+    this.detail = detail;
+    this.httpStatus = httpStatus;
+    this.schemaVersion = schemaVersion;
+  }
+}
+
+function isMarketplaceImportDraftSuccess(
+  value: unknown
+): value is MarketplaceImportDraftSuccess {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  if (typeof v.schema_version !== 'number' || !v.draft || typeof v.draft !== 'object')
+    return false;
+  const d = v.draft as Record<string, unknown>;
+  return (
+    typeof d.agent_count === 'number' &&
+    typeof d.realm_description === 'string' &&
+    'adapter_hint' in d &&
+    Array.isArray(d.policy_refs)
+  );
+}
+
+/** POST /marketplace/templates/import-draft. Body must be the manifest JSON
+ *  text (UTF-8). Verification runs only on Core — pass through bytes from
+ *  `File.text()` without re-shaping. */
+export async function postMarketplaceImportDraft(
+  base: string,
+  manifestJson: string,
+  signal?: AbortSignal
+): Promise<MarketplaceImportDraftSuccess> {
+  const url = `${base.replace(/\/+$/, '')}/marketplace/templates/import-draft`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: manifestJson,
+      signal,
+    });
+  } catch (err) {
+    throw new ImportDraftApiError(
+      'network_error',
+      err instanceof Error ? err.message : 'fetch failed',
+      0,
+      0
+    );
+  }
+
+  const status = response.status;
+  const parsed = await readJsonOrThrow(response, status);
+
+  if (status === 200) {
+    if (!isMarketplaceImportDraftSuccess(parsed)) {
+      throw new ImportDraftApiError(
+        'bad_response',
+        'POST /marketplace/templates/import-draft 200 body missing required keys',
+        status,
+        0
+      );
+    }
+    return parsed;
+  }
+
+  if (status === 422 && parsed && typeof parsed === 'object') {
+    const b = parsed as Record<string, unknown>;
+    const code = typeof b.code === 'string' ? b.code : 'bad_response';
+    const det = typeof b.detail === 'string' ? b.detail : `HTTP ${status}`;
+    const sv = typeof b.schema_version === 'number' ? b.schema_version : 0;
+    throw new ImportDraftApiError(code, det, status, sv);
+  }
+
+  const fallback =
+    parsed && typeof parsed === 'object' && 'detail' in parsed
+      ? String((parsed as Record<string, unknown>).detail)
+      : `HTTP ${status}`;
+  throw new ImportDraftApiError('bad_response', fallback, status, 0);
 }

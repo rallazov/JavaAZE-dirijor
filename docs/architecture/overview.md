@@ -212,10 +212,11 @@ and `verify_template_manifest` with a closed error taxonomy (`PARSE` /
 derived JSON Schema lives under `docs/reference/schemas/`. Full detail:
 [`docs/reference/template-manifest.md`](../reference/template-manifest.md).
 
-**Story 7.2** (backlog / scheduled separately) wires **import → realm draft**
-using **only** manifests that verify successfully — no automatic apply of
-templates to Terraform in 7.1; manifests describe intent, policy references,
-and pins.
+**Story 7.2** wires **verified import → realm draft →** existing **`POST /realms/spin`**
+(Core HTTP `POST /marketplace/templates/import-draft` + UI “Import template”).
+There is **no** automatic apply of templates to Terraform or egress modules;
+manifests describe intent, policy references (returned as read-only draft
+metadata), and pins. Verification is **library-only** in Python (`verify_template_manifest`).
 
 ---
 
