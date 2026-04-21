@@ -863,7 +863,12 @@ Core remains HTTP POST).
 - `session.hello` — first frame (`seq == 0`). Payload includes `service_version`, `schema_version`, `supported_event_types`, `heartbeat_interval_s`, and `connection_id` (UUID for this TCP session).
 - `heartbeat` — emitted every `HEARTBEAT_INTERVAL_S` (default **15 s**). Empty payload.
 - `topology.delta` — `payload.agents?: AgentPatch[]`, `payload.edges?: EdgePatch[]`. Each patch carries an `id`; `_tombstone: true` means "remove this id". All other keys are a shallow upsert. Story 4.2 sets agent `status` to `"quarantined"` (and related hints) when policy isolates an agent.
-- `metrics.update` — `payload` is a partial of the canvas `RealmMetrics` shape. Shallow-merged into the store.
+- `metrics.update` — `payload` is a **partial** of the canvas `RealmMetrics` shape (camelCase JSON). The client **shallow-merges** into `metrics`; if `auditPreview` is present it **replaces** the prior array wholesale (see `frontend/store/canvas-store.ts`). v1 keys (all optional in any single frame; the server may emit `{}` on a periodic tick when nothing changed):
+  - `latencyMs` (`number`) — realm-level latency **estimate** from Core (consensus rounds, score gap, quarantine pressure); best-effort vs Grafana/Tempo latency views until optional backend query exists.
+  - `securityPosture` (`number`, 0–100) — aggregate posture; degrades with quarantined-agent count.
+  - `auditPreview` (`array`) — short `{ id, at, summary }` rows from the realm audit ring; safe strings only.
+  - `quarantinedAgentCount` (`number`, ≥ 0) — distinct agents with an active quarantine record for this realm.
+  **Cadence:** emit on material changes (consensus with `realm_id`, quarantine, spin phase updates) plus **≤ 1 Hz** reconcile per `realm_id` while at least one subscriber exists; first frame after `session.hello` includes a Core-derived snapshot when state is available.
 - `hitl.pending` — `payload.action` is a full `CriticalAction`; dedup by `action.id`.
 - `realm.mesh.state` — `payload.job_id`, `payload.status`, `payload.correlation_id`, optional `code` / `message` on failure (Story 5.1). Authoritative enrollment fields remain on `GET /realms/{job_id}.outputs.mesh`.
 - `session.bye` — reserved for a future **server-initiated** graceful shutdown (operator drain, deploy, etc.). v0.1 does not emit it; sessions end with client close or server `1011` / process teardown.

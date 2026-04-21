@@ -180,6 +180,10 @@ export function InspectorPanel({ className }: { className?: string }) {
               <li>
                 Edge RTT p50: <span className="text-realm-cyan">{metrics.latencyMs} ms</span>
               </li>
+              <li>
+                Quarantined agents:{' '}
+                <span className="text-realm-amber">{metrics.quarantinedAgentCount}</span>
+              </li>
             </ul>
           </section>
 

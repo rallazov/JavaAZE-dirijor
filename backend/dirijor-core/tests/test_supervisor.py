@@ -483,6 +483,18 @@ def _drain_connections() -> None:
     `reset()` helper on the supervisor (tests MUST not drive production API
     surface), so we reach in defensively only here."""
     supervisor._CONNECTIONS.clear()
+    supervisor._last_metrics_payload_sig.clear()
+
+
+def _drain_ws_until_types(ws, types_ok: set[str], *, deadline_s: float = 2.0):
+    """Receive frames until `type` is in `types_ok` (skips heartbeats, etc.)."""
+
+    deadline = time.monotonic() + deadline_s
+    while time.monotonic() < deadline:
+        frame = ws.receive_json()
+        if frame["type"] in types_ok:
+            return frame
+    raise AssertionError(f"timeout waiting for one of {types_ok!r}")
 
 
 def test_ws_accepts_valid_realm_id():
@@ -552,9 +564,45 @@ def test_ws_rejects_forbidden_realm(monkeypatch):
     assert exc_info.value.code == 4403
 
 
+def test_ws_metrics_update_after_session_hello():
+    """Story 6.3 — Core-derived HUD arrives over `metrics.update` after connect."""
+    _drain_connections()
+    with TestClient(supervisor.app) as local_client:
+        with local_client.websocket_connect("/ws/realm/hud-demo") as ws:
+            hello = ws.receive_json()
+            assert hello["type"] == "session.hello"
+            frame = _drain_ws_until_types(ws, {"metrics.update"}, deadline_s=2.0)
+            assert frame["type"] == "metrics.update"
+            pl = frame["payload"]
+            assert "latencyMs" in pl
+            assert "securityPosture" in pl
+            assert "auditPreview" in pl
+            assert "quarantinedAgentCount" in pl
+            assert isinstance(pl["auditPreview"], list)
+            assert isinstance(pl["quarantinedAgentCount"], int)
+
+
+def test_ws_metrics_update_after_consensus_with_realm():
+    """Story 6.3 — consensus with realm_id fans out a refreshed metrics frame."""
+    _drain_connections()
+    with TestClient(supervisor.app) as local_client:
+        with local_client.websocket_connect("/ws/realm/metrics-realm") as ws:
+            hello = ws.receive_json()
+            assert hello["type"] == "session.hello"
+            _drain_ws_until_types(ws, {"metrics.update"}, deadline_s=2.0)
+            response = local_client.post(
+                "/consensus",
+                json={"realm_id": "metrics-realm", "opinions": [{"opinion": "yes"}]},
+            )
+            assert response.status_code == 200, response.text
+            frame = _drain_ws_until_types(ws, {"metrics.update"}, deadline_s=2.0)
+            assert frame["payload"]["latencyMs"] >= 1
+
+
 def test_ws_broadcast_reaches_only_matching_realm():
     """AC 2 — tenant isolation: `broadcast_event("A", …)` reaches A, not B.
-    Also verifies monotonic `seq` per-session (A: 0=hello, 1=delta)."""
+    Also verifies monotonic `seq` per-session (A: 0=hello, N× `metrics.update`,
+    then `topology.delta` at seq 1+N)."""
     _drain_connections()
     with TestClient(supervisor.app) as local_client:
         with local_client.websocket_connect("/ws/realm/A") as ws_a, \
@@ -574,10 +622,16 @@ def test_ws_broadcast_reaches_only_matching_realm():
             )
             assert delivered == 1
 
+            # Story 6.3 may emit multiple `metrics.update` frames (initial + ≤1 Hz
+            # reconcile) before the test's `topology.delta` — drain all of them.
+            metrics_seen = 0
             frame = ws_a.receive_json()
+            while frame["type"] == "metrics.update":
+                metrics_seen += 1
+                frame = ws_a.receive_json()
             assert frame["type"] == "topology.delta"
             assert frame["realm_id"] == "A"
-            assert frame["seq"] == 1  # post-hello increment
+            assert frame["seq"] == 1 + metrics_seen  # hello=0, then N metrics, then delta
             assert frame["payload"]["agents"][0]["id"] == "x"
 
             # B must NOT have received the frame. Starlette's test-mode WS
@@ -659,6 +713,12 @@ def test_ws_close_1011_on_send_failure(monkeypatch):
         raise RuntimeError("simulated send failure")
 
     monkeypatch.setattr(supervisor, "_send_envelope", failing_send)
+    monkeypatch.setattr(supervisor, "_ensure_metrics_reconcile_loop", lambda: None)
+
+    async def _noop_metrics(*_a: object, **_k: object) -> None:
+        return None
+
+    monkeypatch.setattr(supervisor, "emit_realm_metrics_update", _noop_metrics)
 
     with TestClient(supervisor.app) as local_client:
         with local_client.websocket_connect("/ws/realm/fail") as ws:

@@ -87,6 +87,7 @@ from qdrant_client.models import (
 
 import audit_export as audit_export_lib
 import mesh_bootstrap as mesh_bootstrap_lib
+import realm_metrics as realm_metrics_lib
 import otel as otel_lib
 from safety_policy import (
     AnomalyPolicyDocument,
@@ -1547,6 +1548,7 @@ async def _record_quarantine_and_broadcast(
             }
         },
     )
+    await emit_realm_metrics_update(realm_id, force=True)
 
 
 async def _run_anomaly_after_consensus(
@@ -1760,8 +1762,13 @@ async def run_consensus(
     )
 
     if req.realm_id:
+        rid = req.realm_id.strip()
+        _REALM_CONSENSUS_LAST[rid] = {
+            "score": payload.consensus_score,
+            "rounds": payload.rounds,
+        }
         await audit_export_lib.append_consensus_completed(
-            req.realm_id,
+            rid,
             audit_export_lib.ConsensusCompletedAuditPayload(
                 decision=payload.decision,
                 consensus_score=payload.consensus_score,
@@ -1774,6 +1781,9 @@ async def run_consensus(
         )
 
     await _run_anomaly_after_consensus(req, payload, opinions)
+
+    if req.realm_id:
+        await emit_realm_metrics_update(req.realm_id.strip(), force=True)
 
     return payload
 
@@ -3006,10 +3016,12 @@ async def _run_spin_job(
                     ),
                 )
                 terminal_code = exc.code
+                await emit_realm_metrics_update(job.realm_id, force=True)
                 return
 
             error_source = "post-validate"
             _update_job(job, phase="provisioning")
+            await emit_realm_metrics_update(job.realm_id, force=True)
 
             error_source = "adapter.provision"
             try:
@@ -3025,6 +3037,7 @@ async def _run_spin_job(
                     ),
                 )
                 terminal_code = exc.code
+                await emit_realm_metrics_update(job.realm_id, force=True)
                 return
             if not isinstance(outputs, dict):
                 # Keep `error_source == "adapter.provision"` so the outer
@@ -3037,6 +3050,7 @@ async def _run_spin_job(
 
             error_source = "post-provision"
             _update_job(job, phase="ready", outputs=outputs)
+            await emit_realm_metrics_update(job.realm_id, force=True)
             error_source = "mesh-bootstrap"
             await _run_mesh_bootstrap_after_ready(job)
         except asyncio.CancelledError:
@@ -3075,6 +3089,7 @@ async def _run_spin_job(
                     ),
                 )
                 terminal_code = code
+                await emit_realm_metrics_update(job.realm_id, force=True)
             # Deliberately do NOT re-raise for non-cancel exceptions —
             # propagating from a background task would orphan the job in a
             # non-terminal phase. The failure is now encoded in job state.
@@ -3850,6 +3865,16 @@ class _WsSession:
 # as a documented follow-up, NOT a pre-introduced dependency.
 _CONNECTIONS: dict[str, set[_WsSession]] = {}
 
+# --- Story 6.3 — Canvas HUD (`metrics.update`) -------------------------------
+#
+# Last consensus outcome per realm (for latency/security estimates). Not sent
+# to clients directly — consumed only by `_realm_metrics_snapshot_for`.
+_REALM_CONSENSUS_LAST: dict[str, dict[str, Any]] = {}
+# Dedupe periodic `metrics.update` frames — JSON signature of last broadcast.
+_last_metrics_payload_sig: dict[str, str] = {}
+METRICS_RECONCILE_INTERVAL_S = 1.0
+_metrics_reconcile_task: asyncio.Task | None = None
+
 
 def _authorize_realm(realm_id: str) -> tuple[bool, str | None]:
     """Realm authorization hook — v0.1 no-op.
@@ -3958,6 +3983,62 @@ async def broadcast_event(
     return delivered
 
 
+async def _realm_metrics_snapshot_for(realm_id: str) -> dict[str, Any]:
+    async with _QUARANTINE_LOCK:
+        bucket = _QUARANTINE_BY_REALM.get(realm_id, {})
+        unique_agents = {rec.agent_id for rec in bucket.values()}
+        q_count = len(unique_agents)
+    last = _REALM_CONSENSUS_LAST.get(realm_id)
+    score: float | None = None
+    rounds: int | None = None
+    if last is not None:
+        score = float(last.get("score", 0.0))
+        rounds = int(last.get("rounds", 1))
+    return await realm_metrics_lib.build_realm_metrics_snapshot(
+        realm_id,
+        quarantine_unique_agent_count=q_count,
+        consensus_score=score,
+        consensus_rounds=rounds,
+    )
+
+
+async def emit_realm_metrics_update(realm_id: str, *, force: bool = False) -> None:
+    """Broadcast `metrics.update` when subscribers exist and payload changed.
+
+    Cadence: callers invoke on material changes; a ≤1 Hz reconcile loop
+    covers drift without spamming identical frames.
+    """
+
+    if not _CONNECTIONS.get(realm_id):
+        return
+    payload = await _realm_metrics_snapshot_for(realm_id)
+    sig = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    if not force and _last_metrics_payload_sig.get(realm_id) == sig:
+        return
+    _last_metrics_payload_sig[realm_id] = sig
+    await broadcast_event(realm_id, "metrics.update", payload)
+
+
+def _ensure_metrics_reconcile_loop() -> None:
+    global _metrics_reconcile_task
+    if _metrics_reconcile_task is not None and not _metrics_reconcile_task.done():
+        return
+
+    async def _loop() -> None:
+        while True:
+            await asyncio.sleep(METRICS_RECONCILE_INTERVAL_S)
+            for rid in list(_CONNECTIONS.keys()):
+                if _CONNECTIONS.get(rid):
+                    try:
+                        await emit_realm_metrics_update(rid, force=False)
+                    except Exception:
+                        logger.exception(
+                            "realm.metrics.reconcile_failed realm=%s", rid
+                        )
+
+    _metrics_reconcile_task = asyncio.create_task(_loop())
+
+
 async def _heartbeat_loop(session: _WsSession) -> None:
     """Per-session heartbeat scheduler.
 
@@ -4047,6 +4128,8 @@ async def realm_ws(websocket: WebSocket, realm_id: str) -> None:
                 },
             )
             session.heartbeat_task = asyncio.create_task(_heartbeat_loop(session))
+            _ensure_metrics_reconcile_loop()
+            asyncio.create_task(emit_realm_metrics_update(realm_id, force=True))
             while True:
                 # v0.1 is Core → Canvas only. Canvas → Core commands remain HTTP
                 # POST (Story 2.1 spin, Story 4.x HITL). We receive_text to keep
@@ -4076,6 +4159,7 @@ async def realm_ws(websocket: WebSocket, realm_id: str) -> None:
                 bucket.discard(session)
                 if not bucket:
                     _CONNECTIONS.pop(realm_id, None)
+                    _last_metrics_payload_sig.pop(realm_id, None)
             logger.info(
                 "ws.session.close",
                 extra={

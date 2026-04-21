@@ -7,6 +7,8 @@ export interface RealmMetrics {
   securityPosture: number;
   /** Recent immutable audit entries (preview only) */
   auditPreview: { id: string; at: string; summary: string }[];
+  /** Story 6.3 — agents currently quarantined in this realm (Core HUD). */
+  quarantinedAgentCount: number;
 }
 
 export interface CriticalAction {
