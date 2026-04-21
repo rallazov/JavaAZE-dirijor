@@ -1198,6 +1198,8 @@ app = FastAPI(title="Dirijor Supervisor", version=SERVICE_VERSION)
 # Browser canvas (Next.js) calls Core from another origin (e.g. :3001 → :8000).
 # Without CORS, `fetch` fails closed and the UI surfaces `network_error`.
 # Override with DIRIJOR_CORS_ORIGINS=comma,separated,origins for deployments.
+# Next.js prints a "Network: http://192.168.x.x:3001" URL — that Origin is NOT
+# localhost; allow RFC1918 hosts in dev via regex unless explicitly disabled.
 def _cors_allow_origins() -> list[str]:
     raw = os.environ.get("DIRIJOR_CORS_ORIGINS", "").strip()
     if raw:
@@ -1210,9 +1212,30 @@ def _cors_allow_origins() -> list[str]:
     ]
 
 
+def _cors_allow_origin_regex() -> str | None:
+    if os.environ.get("DIRIJOR_CORS_ORIGINS", "").strip():
+        return None
+    if os.environ.get("DIRIJOR_CORS_STRICT_LOCALHOST", "").strip() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return None
+    # loopback + RFC1918 + optional port (Next dev on any port / LAN URL).
+    return (
+        r"^https?://("
+        r"localhost|127\.0\.0\.1|\[::1\]"
+        r"|192\.168\.\d{1,3}\.\d{1,3}"
+        r"|10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+        r"|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}"
+        r")(?::\d+)?$"
+    )
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_allow_origins(),
+    allow_origin_regex=_cors_allow_origin_regex(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
