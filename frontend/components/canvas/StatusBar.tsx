@@ -58,6 +58,10 @@ export function StatusBar({ className }: { className?: string }) {
         Security posture{' '}
         <span className="text-realm-emerald">{metrics.securityPosture} / 100</span>
       </span>
+      <span className="font-mono text-realm-muted">
+        Quarantined agents{' '}
+        <span className="text-realm-amber">{metrics.quarantinedAgentCount}</span>
+      </span>
       <span className="text-realm-muted">
         Audit trail signed · Harper policy engine · Human gates enforced on destructive actions
       </span>

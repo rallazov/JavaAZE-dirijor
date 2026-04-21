@@ -182,7 +182,19 @@ bolt-on, they rot.
   [`docs/observability/README.md`](../observability/README.md)). Optional
   `docker compose --profile observability` runs collector + Tempo + Grafana;
   OTLP remains opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT`.
-- Canvas-integrated live safety metrics: Story 6.3.
+- **Canvas HUD (`metrics.update`)** — **Story 6.3** *(shipped)*: live realm safety
+  slice (latency estimate, security posture, audit preview rows,
+  `quarantinedAgentCount`) is aggregated **in Dirijor Core** and delivered over
+  the existing WebSocket channel (`broadcast_event` → `metrics.update`). The
+  browser does not call Grafana, Tempo, or OTLP directly. v1 uses
+  supervisor-authoritative state (quarantine registry, last consensus outcome,
+  realm audit ring) plus a **≤ 1 Hz** per-realm reconcile while WebSocket
+  sessions exist; material changes (consensus completion, quarantine, spin phase
+  transitions) emit immediately. Numbers are **eventually consistent** with
+  Grafana realm-health (6.2) where they share the same underlying events;
+  latency is a **best-effort** estimate vs TraceQL latency panels until optional
+  Core-side query of metrics/traces lands (see `deferred-work.md`). Contract and
+  payload keys: `docs/reference/supervisor-api.md` (WebSocket → `metrics.update`).
 
 ---
 

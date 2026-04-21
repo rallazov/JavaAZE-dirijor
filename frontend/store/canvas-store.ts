@@ -100,11 +100,24 @@ const initialEdges: Edge[] = [
 const initialMetrics: RealmMetrics = {
   latencyMs: 34,
   securityPosture: 91,
+  quarantinedAgentCount: 0,
   auditPreview: [
     { id: 'a1', at: '2m ago', summary: 'Realm boundary verified · mTLS handshake OK' },
     { id: 'a2', at: '6m ago', summary: 'Consensus quorum 0.97 on routing policy' },
   ],
 };
+
+/** Story 6.3 — pure merge for `metrics.update` (tested in Vitest). */
+export function mergeRealmMetrics(
+  state: RealmMetrics,
+  payload: MetricsUpdatePayload
+): RealmMetrics {
+  const next: RealmMetrics = { ...state, ...payload };
+  if (Object.prototype.hasOwnProperty.call(payload, 'auditPreview')) {
+    next.auditPreview = payload.auditPreview ?? [];
+  }
+  return next;
+}
 
 const initialPending: CriticalAction[] = [
   {
@@ -330,7 +343,7 @@ export const useCanvasStore = create<CanvasStore>()(
         }),
       applyMetricsUpdate: (payload) =>
         set((state) => ({
-          metrics: { ...state.metrics, ...payload },
+          metrics: mergeRealmMetrics(state.metrics, payload),
         })),
       applyHitlPending: (payload) =>
         set((state) => {

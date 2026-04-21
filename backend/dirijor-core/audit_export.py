@@ -146,6 +146,40 @@ async def _append(
         d.append(event)
 
 
+async def hud_audit_preview_entries(
+    realm_id: str, *, limit: int = 5
+) -> list[dict[str, str]]:
+    """Return recent audit rows for Canvas HUD (`metrics.update`).
+
+    Safe strings only — ids plus short summaries; no raw prompts or tool bodies.
+    """
+
+    cap = max(1, min(20, int(limit)))
+    async with _AUDIT_LOCK:
+        d = _AUDIT_DEQUES.get(realm_id)
+        events = list(d)[-cap:] if d else []
+    out: list[dict[str, str]] = []
+    for ev in events:
+        eid = str(ev.get("event_id", "") or "event")
+        ts = str(ev.get("ts", ""))
+        et = ev.get("type", "")
+        p = ev.get("payload") or {}
+        if et == "consensus.completed":
+            summary = (
+                f"Consensus · {p.get('termination_reason', '?')} · "
+                f"score {float(p.get('consensus_score', 0.0)):.2f}"
+            )
+        elif et == "safety.quarantine":
+            aid = str(p.get("agent_id", "?"))
+            rid = str(p.get("rule_id", "?"))
+            summary = f"Quarantine · agent {aid} · rule {rid}"
+        else:
+            continue
+        at_short = ts if len(ts) <= 32 else ts[:32]
+        out.append({"id": eid, "at": at_short, "summary": summary})
+    return out
+
+
 async def filtered_events(
     realm_id: str, window_start: datetime, window_end: datetime
 ) -> list[dict[str, Any]]:
