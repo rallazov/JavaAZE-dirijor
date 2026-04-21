@@ -32,6 +32,12 @@ v0.1 supervisor exposes — no opinions, no recommendations. For the
 | `SERVICE_VERSION` | `"0.1.0"` | Module constant; `FastAPI(version=...)` and every response read this. |
 | `SCHEMA_VERSION` | `8` | Contract shape version. Story 5.1 bumped 7→8: gated mesh bootstrap after `phase == ready` (`DIRIJOR_MESH_BOOTSTRAP_ENABLED` truthy like `DIRIJOR_AUDIT_EXPORT_ENABLED` / `DIRIJOR_SAFETY_SIGNALS_ENABLED`: `1` / `true` / `yes`); additive `outputs.mesh`, `outputs.headscale_control_url`; `POST /realms/{job_id}/mesh/preauth-key` (one-shot secret, not echoed on `GET` poll); `POST /realms/{job_id}/mesh/retry`; WebSocket `realm.mesh.state`; `SpinError` codes `mesh_bootstrap_disabled`, `mesh_preauth_consumed`, `mesh_preauth_not_eligible`, `mesh_headscale_api_error`, `mesh_retry_conflict`. Story 4.3 bumped 6→7: gated `POST /audit/export` (ZIP audit bundle); realm-scoped in-memory audit ring; new `SpinError` codes `audit_export_disabled`, `audit_export_too_large`, `audit_export_invalid_window`. Story 4.2 bumped 5→6: optional `realm_id` / `anomaly_subject_agent_id` on `POST /consensus`; `GET /safety/quarantine/{realm_id}`; gated `POST /safety/signal`; optional `anomaly_policy` readiness entry; WebSocket payloads remain existing `topology.delta` / `hitl.pending` types (additive agent fields such as `status: "quarantined"`). Story 4.1 bumped 4→5: semantic-cache HTTP + consensus cache fields + `semantic_cache` probe. Story 2.2 bumped 3→4 (`DELETE /realms/{job_id}` + destroy-related `outputs` keys + nine new `SpinError.code` values). Story 3.2 bumped 1→2 (debate loop), Story 3.3 bumped 2→3 (WebSocket channel + `realtime` block). Story 2.1 added the `realm_manager` readiness-registry dep without bumping — precedent for "dep-only additive" extensions. Story 2.3 added **`egress_policy_denied`** and Terraform egress controls **without** bumping `SCHEMA_VERSION` (env- and module-driven only). |
 
+### Marketplace / template manifest (library — Story 7.1)
+
+Swarm template manifests (`dirijor.template_manifest.v1`) are validated in-process by `verify_template_manifest` in `backend/dirijor-core/template_manifest.py`. There is **no** new HTTP route for templates in Story 7.1; a future story may add read-only marketplace endpoints under a **`SCHEMA_VERSION` bump** if the JSON contract needs to surface on the wire.
+
+Authoritative detail, canonical JSON signing, error codes (`PARSE` / `SCHEMA` / `SIGNATURE` / `PINS`), and derived JSON Schema: [`template-manifest.md`](template-manifest.md).
+
 ## Endpoints at a glance
 
 | Method | Path | Purpose | Status codes |
