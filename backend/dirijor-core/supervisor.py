@@ -2004,6 +2004,8 @@ class SpinJob(BaseModel):
     phase: SpinPhase
     adapter: str
     created_at: str
+    # Same relative path as SpinResponse.status_url (canvas client polls this).
+    status_url: str
     updated_at: str
     realm_description: str
     agent_count: int
@@ -3514,6 +3516,7 @@ async def spin_realm(req: SpinRequest) -> Any:
         phase="validating",
         adapter=adapter.name,
         created_at=now,
+        status_url=f"/realms/{job_id}",
         updated_at=now,
         realm_description=req.realm_description,
         agent_count=req.agent_count,
