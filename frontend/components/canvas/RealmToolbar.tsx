@@ -1,8 +1,8 @@
 // Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
 'use client';
 
-import { useEffect, useState } from 'react';
-import { ChevronDown, Loader2, PanelRight, PanelRightClose, RotateCcw, Sparkles } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { ChevronDown, FileUp, Loader2, PanelRight, PanelRightClose, RotateCcw, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Tooltip,
@@ -10,7 +10,8 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
-import { useRealmSpin } from '@/hooks/useRealmSpin';
+import { apiBase, useRealmSpin } from '@/hooks/useRealmSpin';
+import { ImportDraftApiError, postMarketplaceImportDraft } from '@/lib/dirijor-api';
 import { useCanvasStore } from '@/store/canvas-store';
 import { cn } from '@/lib/utils';
 
@@ -40,6 +41,13 @@ export function RealmToolbar({ className }: { className?: string }) {
   } = useRealmSpin();
 
   const [destroyArmed, setDestroyArmed] = useState(false);
+  const importInputRef = useRef<HTMLInputElement>(null);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importError, setImportError] = useState<ImportDraftApiError | null>(null);
+  const [prefillAdapterHint, setPrefillAdapterHint] = useState<string | undefined>(undefined);
+  const [prefillAgentCount, setPrefillAgentCount] = useState<number | undefined>(undefined);
+
+  const busySpin = phase === 'validating' || phase === 'provisioning';
 
   useEffect(() => {
     if (!destroyArmed) return;
@@ -143,6 +151,75 @@ export function RealmToolbar({ className }: { className?: string }) {
           leaves your boundary without verification.
         </p>
         <div className="ml-auto flex min-w-[min(100%,20rem)] flex-1 flex-wrap items-center justify-end gap-2 md:max-w-xl">
+          <input
+            ref={importInputRef}
+            type="file"
+            accept="application/json,.json"
+            className="sr-only"
+            aria-label="Import marketplace template JSON file"
+            onChange={async (e) => {
+              const file = e.target.files?.[0];
+              e.target.value = '';
+              if (!file) return;
+              setImportBusy(true);
+              setImportError(null);
+              try {
+                const text = await file.text();
+                const res = await postMarketplaceImportDraft(apiBase(), text);
+                setDescription(res.draft.realm_description);
+                setPrefillAdapterHint(res.draft.adapter_hint ?? undefined);
+                setPrefillAgentCount(res.draft.agent_count);
+              } catch (err) {
+                setPrefillAdapterHint(undefined);
+                setPrefillAgentCount(undefined);
+                if (err instanceof ImportDraftApiError) {
+                  setImportError(err);
+                } else {
+                  setImportError(
+                    new ImportDraftApiError(
+                      'bad_response',
+                      err instanceof Error ? err.message : 'import failed',
+                      0,
+                      0
+                    )
+                  );
+                }
+              } finally {
+                setImportBusy(false);
+              }
+            }}
+          />
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="inline-flex">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="default"
+                  className="min-w-[8rem] gap-1.5"
+                  disabled={importBusy || busySpin}
+                  aria-busy={importBusy}
+                  onClick={() => importInputRef.current?.click()}
+                >
+                  {importBusy ? (
+                    <>
+                      <Loader2 className="size-4 animate-spin" aria-hidden />
+                      Importing…
+                    </>
+                  ) : (
+                    <>
+                      <FileUp className="size-4" aria-hidden />
+                      Import template
+                    </>
+                  )}
+                </Button>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="max-w-xs">
+              Upload a verified template `.json` — Core validates and prefills the realm description
+              for POST /realms/spin.
+            </TooltipContent>
+          </Tooltip>
           <label className="sr-only" htmlFor="realm-desc">
             Describe your realm
           </label>
@@ -162,9 +239,15 @@ export function RealmToolbar({ className }: { className?: string }) {
                   variant="primary"
                   size="default"
                   className="min-w-[9rem] transition-transform duration-150 active:scale-[0.98]"
-                  disabled={phase === 'validating' || phase === 'provisioning'}
-                  onClick={() => spinPrivateRealm({ realmDescription: description })}
-                  aria-busy={phase === 'validating' || phase === 'provisioning'}
+                  disabled={busySpin}
+                  onClick={() =>
+                    spinPrivateRealm({
+                      realmDescription: description,
+                      adapterHint: prefillAdapterHint,
+                      agentCount: prefillAgentCount,
+                    })
+                  }
+                  aria-busy={busySpin}
                 >
                   {phase === 'idle' || phase === 'ready' || phase === 'failed' ? (
                     'Spin realm'
@@ -226,6 +309,14 @@ export function RealmToolbar({ className }: { className?: string }) {
               ? outputs.destroyed_at
               : '—'}
             ). Job {jobId} retained for audit.
+          </p>
+        )}
+        {importError && (
+          <p
+            className="basis-full text-right font-mono text-[10px] text-amber-300 md:basis-auto"
+            role="status"
+          >
+            import {importError.code}: {importError.detail}
           </p>
         )}
         {phase === 'failed' && error && (

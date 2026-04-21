@@ -86,8 +86,10 @@ from qdrant_client.models import (
 )
 
 import audit_export as audit_export_lib
+import marketplace_import_draft as marketplace_import_draft_lib
 import mesh_bootstrap as mesh_bootstrap_lib
 import otel as otel_lib
+import template_manifest as tm
 from safety_policy import (
     AnomalyPolicyDocument,
     load_anomaly_policy_from_path,
@@ -137,7 +139,11 @@ SERVICE_VERSION = "0.1.0"
 #     after `phase == ready`; additive `outputs.mesh`, `outputs.headscale_control_url`;
 #     `POST /realms/{job_id}/mesh/preauth-key` + `POST /realms/{job_id}/mesh/retry`;
 #     WebSocket `realm.mesh.state`; new `SpinError` codes for mesh HTTP surface.
-SCHEMA_VERSION = 8
+#   v9 (Story 7.2, 2026-04-20) — Marketplace import-draft:
+#     `POST /marketplace/templates/import-draft` returns `{schema_version, draft}` on
+#     200 or `{schema_version, code, detail}` on 422 (verify_template_manifest codes
+#     PARSE/SCHEMA/SIGNATURE/PINS plus `draft_agent_count_exceeded`). Not SpinError.
+SCHEMA_VERSION = 9
 STARTED_AT = time.monotonic()
 STARTUP_GRACE_S = 1.0
 
@@ -1999,6 +2005,36 @@ class MeshRetryAccepted(BaseModel):
     schema_version: int
 
 
+# --- Marketplace import draft (Story 7.2) -------------------------------------
+
+ImportDraftFailureCode = Literal[
+    "PARSE",
+    "SCHEMA",
+    "SIGNATURE",
+    "PINS",
+    "draft_agent_count_exceeded",
+]
+
+
+class MarketplaceImportDraftSuccessResponse(BaseModel):
+    """`POST /marketplace/templates/import-draft` 200 body."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int
+    draft: marketplace_import_draft_lib.MarketplaceRealmDraft
+
+
+class MarketplaceImportDraftFailureResponse(BaseModel):
+    """Shared 422 body for verification failures and post-verify draft rules."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int
+    code: ImportDraftFailureCode
+    detail: str
+
+
 # --- Realm adapter seam ------------------------------------------------------
 
 
@@ -3317,6 +3353,64 @@ async def ingest_safety_signal(
         )
     await _run_anomaly_for_signal(req)
     return Response(status_code=204)
+
+
+@app.post(
+    "/marketplace/templates/import-draft",
+    status_code=200,
+    responses={
+        200: {
+            "model": MarketplaceImportDraftSuccessResponse,
+            "description": "Verified manifest mapped to realm draft (operator may edit before spin).",
+        },
+        422: {
+            "model": MarketplaceImportDraftFailureResponse,
+            "description": "Manifest verification failure or draft_agent_count_exceeded.",
+        },
+    },
+    tags=["marketplace"],
+)
+async def marketplace_templates_import_draft(
+    request: Request,
+) -> JSONResponse:
+    """Verify a template manifest (Story 7.1) and map to Epic 2 spin draft fields.
+
+    Request body must be raw UTF-8 JSON bytes of a single manifest object (same
+    bytes semantics as ``verify_template_manifest`` — duplicate keys rejected).
+    """
+    raw = await request.body()
+    verified = tm.verify_template_manifest(
+        raw,
+        effective_supervisor_schema_version=SCHEMA_VERSION,
+        pin_bindings=marketplace_import_draft_lib.template_manifest_pin_bindings_from_env(),
+    )
+    if isinstance(verified, tm.TemplateManifestVerifyFailure):
+        payload = MarketplaceImportDraftFailureResponse(
+            schema_version=SCHEMA_VERSION,
+            code=verified.code,
+            detail=verified.detail,
+        )
+        return JSONResponse(status_code=422, content=payload.model_dump(mode="json"))
+
+    mapped = marketplace_import_draft_lib.map_verified_manifest_to_realm_draft(
+        verified.manifest
+    )
+    if mapped == "draft_agent_count_exceeded":
+        payload = MarketplaceImportDraftFailureResponse(
+            schema_version=SCHEMA_VERSION,
+            code="draft_agent_count_exceeded",
+            detail=(
+                "manifest lists more than 50 agents; reduce agent slots "
+                "before import"
+            ),
+        )
+        return JSONResponse(status_code=422, content=payload.model_dump(mode="json"))
+
+    ok = MarketplaceImportDraftSuccessResponse(
+        schema_version=SCHEMA_VERSION,
+        draft=mapped,
+    )
+    return JSONResponse(status_code=200, content=ok.model_dump(mode="json"))
 
 
 @app.post(

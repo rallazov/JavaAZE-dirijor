@@ -96,7 +96,7 @@ You should see a response whose shape matches this (values will differ):
 {
   "service": "dirijor-supervisor",
   "version": "0.1.0",
-  "schema_version": 8,
+  "schema_version": 9,
   "status": "operational",
   "consensus_engine": "ready",
   "uptime_s": 4.8,

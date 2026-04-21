@@ -242,15 +242,15 @@ def test_schema_version_pinned():
     """Loud regression guard — bumping SCHEMA_VERSION requires deliberately
     updating this test AND README sample payloads (Story 3.1 AC 5,
     Story 3.2 AC 5, Story 3.3 AC 7, Story 2.2 AC 10)."""
-    assert supervisor.SCHEMA_VERSION == 8
+    assert supervisor.SCHEMA_VERSION == 9
     assert supervisor.SERVICE_VERSION == "0.1.0"
 
 
-def test_schema_version_is_8():
-    """Explicit belt-and-braces pin — Story 5.1 bumped 7 → 8. If a future
+def test_schema_version_is_9():
+    """Explicit belt-and-braces pin — Story 7.2 bumped 8 → 9. If a future
     story bumps SCHEMA_VERSION again, BOTH this test and
     `test_schema_version_pinned` must be updated together."""
-    assert supervisor.SCHEMA_VERSION == 8
+    assert supervisor.SCHEMA_VERSION == 9
 
 
 # --- Story 3.2 AC 1–4, AC 7 (new debate-loop coverage) ----------------------

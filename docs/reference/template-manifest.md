@@ -65,7 +65,7 @@ See **Pin semantics** below.
 
 - Type: semver string `major.minor.patch`.
 - **Format:** strings that are not `major.minor.patch` fail at **model validation** with code **`SCHEMA`** (before pin-floor checks).
-- Meaning: **minimum** Core HTTP contract floor: the supervisor’s integer `SCHEMA_VERSION` (see `supervisor.py`) is mapped to semver as **`N.0.0`** (e.g. `8` → `8.0.0`).
+- Meaning: **minimum** Core HTTP contract floor: the supervisor’s integer `SCHEMA_VERSION` (see `supervisor.py`) is mapped to semver as **`N.0.0`** (e.g. `9` → `9.0.0`).
 - Verification compares using semver ordering: Core is **too old** if `N.0.0` is **strictly below** the manifest minimum → verification fails with code **`PINS`**.
 
 ### Other `pins` fields (v1)
@@ -117,7 +117,14 @@ Manifests **must not** embed cloud credentials, Terraform state, mesh keys, or r
 
 ## HTTP surface
 
-Story 7.1 ships **library verification + docs + tests** only. Read-only marketplace HTTP (if any) is deferred unless added in a later story with a `SCHEMA_VERSION` bump per [`supervisor-api.md`](supervisor-api.md). See the short pointer subsection there.
+Story 7.1 ships **library verification** (`verify_template_manifest` only). **Story 7.2** adds **`POST /marketplace/templates/import-draft`** on Core (HTTP contract + `SCHEMA_VERSION` bump — see [`supervisor-api.md`](supervisor-api.md)): request body is the manifest JSON object; responses map a verified document to operator-editable realm draft fields and **`POST /realms/spin`** remains the sole provisioner.
+
+### Story 7.2 (import → draft → spin)
+
+1. Client uploads manifest bytes (UTF-8 JSON) to **`POST /marketplace/templates/import-draft`**.
+2. Core validates **only** via **`verify_template_manifest`** (`PARSE` / `SCHEMA` / `SIGNATURE` / `PINS`).
+3. On success, Core returns `draft` (`agent_count`, `realm_description`, optional `adapter_hint`, read-only `policy_refs`). On `len(agents) > 50` after verify, **`draft_agent_count_exceeded`** (`422`).
+4. Operator edits, then calls **`POST /realms/spin`** — no automatic Terraform or egress apply from this story.
 
 ## Golden example (illustrative)
 

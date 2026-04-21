@@ -10,6 +10,8 @@ import {
   DEFAULT_API_BASE,
   deleteRealmJob,
   getRealmJob,
+  ImportDraftApiError,
+  postMarketplaceImportDraft,
   postRealmSpin,
   resolveDirijorApiUrl,
   SpinApiError,
@@ -335,6 +337,59 @@ describe('deleteRealmJob', () => {
     expect(err).toBeInstanceOf(SpinApiError);
     expect(err.code).toBe('network_error');
     expect(err.httpStatus).toBe(0);
+  });
+});
+
+describe('postMarketplaceImportDraft', () => {
+  it('returns parsed success on 200', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        mockJsonResponse(200, {
+          schema_version: 9,
+          draft: {
+            agent_count: 2,
+            realm_description: 'Imported template: t @ 1.0.0',
+            adapter_hint: 'local-noop',
+            policy_refs: [],
+          },
+        })
+      )
+    );
+    const res = await postMarketplaceImportDraft(DEFAULT_API_BASE, '{}');
+    expect(res.schema_version).toBe(9);
+    expect(res.draft.agent_count).toBe(2);
+    expect(res.draft.adapter_hint).toBe('local-noop');
+  });
+
+  it('throws ImportDraftApiError with Core code on 422', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        mockJsonResponse(422, {
+          schema_version: 9,
+          code: 'SCHEMA',
+          detail: 'validation failed',
+        })
+      )
+    );
+    await expect(
+      postMarketplaceImportDraft(DEFAULT_API_BASE, '{}')
+    ).rejects.toMatchObject({
+      name: 'ImportDraftApiError',
+      code: 'SCHEMA',
+      httpStatus: 422,
+      detail: 'validation failed',
+    });
+  });
+
+  it('network failures use ImportDraftApiError', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('offline')));
+    const err = await postMarketplaceImportDraft(DEFAULT_API_BASE, '{}').catch(
+      (e) => e
+    );
+    expect(err).toBeInstanceOf(ImportDraftApiError);
+    expect((err as ImportDraftApiError).code).toBe('network_error');
   });
 });
 
