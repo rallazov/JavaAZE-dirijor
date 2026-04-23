@@ -60,7 +60,7 @@ investor, or a security reviewer.
 
 === "I want to try Dirijor"
 
-    1. [**Tutorial — your first private realm**](guides/tutorials/01-first-realm.md) — 10–15 minutes, ends with a running realm.
+    1. [**Tutorial — your first private realm**](guides/tutorials/01-first-realm.md) — **golden path** (10–15 minutes): Core in Docker, canvas via `npm run dev`, `./scripts/verify-golden-path.sh` or `curl /health`, spin to `ready`.
     2. [**Supervisor HTTP API (v0.1)**](reference/supervisor-api.md) — the stable contract the canvas and your tooling bind to.
 
 === "I want to build on / contribute to Dirijor"

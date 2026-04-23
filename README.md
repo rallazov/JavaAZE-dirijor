@@ -8,10 +8,18 @@ Cutting-edge platform for safety & security of LLM agents and humans.
 One-click private network configurations across unlimited virtual instances on any private cloud (DigitalOcean, Hetzner, Proxmox, etc.).  
 Drag-and-drop canvas + orchestration + multi-agent consensus + verified semantic cache = zero hallucination, zero exposure.
 
-**Quick Start**  
-1. `git clone` this private repo  
-2. `docker compose up` → supervisor API on http://localhost:8000 (frontend is not in Compose yet)  
-3. Network Canvas UI: `cd frontend && npm install && npm run dev` → http://localhost:3000 (redirects to `/canvas`)
+**Quick start (golden path)**  
+The **single** supported first-run is documented end-to-end in
+[`docs/guides/tutorials/01-first-realm.md`](docs/guides/tutorials/01-first-realm.md) (Core in Docker → Network Canvas with `npm run dev` → `GET /health` **200** → spin to **`ready`** with default **local-noop** → WebSocket **Live** in the status bar when env is set). Everything below is a short copy-paste summary; the tutorial has the **LAN / Network URL** and **CORS** detail.
+
+1. `git clone` this private repo.  
+2. `docker compose up --build dirijor-supervisor` → supervisor on `http://localhost:8000` (see `docker-compose.yml`).  
+3. `cd frontend && npm install && cp .env.example .env.local` — adjust `NEXT_PUBLIC_DIRIJOR_API_URL` and `NEXT_PUBLIC_DIRIJOR_WS_URL` if you open the canvas from a **non-loopback** origin (e.g. Next’s “Network” URL).  
+4. `npm run dev` → `http://localhost:3000` (redirects to `/canvas`).  
+5. **Verify Core:** `curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8000/health` should print `200`, or run `./scripts/verify-golden-path.sh` (same check; **requires `curl`**; exit `0` iff HTTP 200).  
+6. In the canvas, **Spin realm** with default adapter (empty / local-noop — no `DIGITALOCEAN_TOKEN`) and confirm the job reaches **`ready`**.
+
+**Advanced (not the golden path):** `mkdocs serve` in `docs/` also defaults to port **8000** and will **conflict** with the supervisor — use another port (e.g. `mkdocs serve -a 127.0.0.1:8001`) or stop Compose first. A Compose-only frontend service remains **out of scope** for the golden path; see tutorial stretch notes.
 
 **Documentation**
 
@@ -29,7 +37,8 @@ Browse locally with:
 
 ```bash
 pip install -r docs/requirements.txt
-mkdocs serve     # http://127.0.0.1:8000
+# Default :8000 clashes with supervisor (see Quick start). Use another port if Core is up:
+mkdocs serve -a 127.0.0.1:8001
 ```
 
 ## Dirijor Supervisor (backend/dirijor-core) — v0.1 HTTP contract

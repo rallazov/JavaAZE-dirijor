@@ -4,9 +4,17 @@ Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
 
 # Tutorial — Your first local Dirijor environment
 
-> **Last verified:** 2026-04-19, against `docs/reference/supervisor-api.md`
-> (`schema_version` **8** on `GET /` after Story 5.1). Re-run the curl +
-> pytest steps after any `SCHEMA_VERSION` bump.
+> **Last verified:** 2026-04-22, against `docs/reference/supervisor-api.md` and
+> live `GET /` / `GET /health` (`SCHEMA_VERSION` **9** after Story 7.2; see
+> `backend/dirijor-core/supervisor.py::SCHEMA_VERSION`). Re-run the curl +
+> pytest steps after any `SCHEMA_VERSION` bump. Numeric fields (`uptime_s`,
+> `timestamp`, `connections`) will differ; shapes should match the reference.
+
+**This page is the golden path** — the one primary narrative for a fresh clone:
+start Core with Compose, run the canvas with `npm run dev`, confirm `/health`,
+then spin a realm to **`ready`** with the default **local-noop** adapter. Other
+ways to run pieces exist (e.g. MkDocs on port 8000, optional Compose profiles);
+those are **advanced** and called out when they conflict with this flow.
 
 **Time:** 10–15 minutes.
 **Prerequisites:** Docker Desktop (or Docker Engine + Compose v2),
@@ -112,7 +120,7 @@ You should see a response whose shape matches this (values will differ):
   "realtime": {
     "connections": 0,
     "heartbeat_interval_s": 15.0,
-    "schema_version": 8
+    "schema_version": 9
   }
 }
 ```
@@ -173,8 +181,9 @@ pip install -r backend/dirijor-core/requirements-dev.txt
 python -m pytest backend/dirijor-core/tests
 ```
 
-**Verify:** you should see **all tests passed** (e.g. **102 passed** in
-~2s on a typical laptop — count grows as stories land). The suite covers
+**Verify:** you should see **all tests passed** (typically in a few seconds on a
+typical laptop — treat pytest’s final summary as the source of truth; the count
+grows as stories land). The suite covers
 HTTP, WebSocket, consensus, realm spin/destroy, terraform adapter seams,
 egress policy, semantic-cache fakes, and schema pins.
 
@@ -206,20 +215,100 @@ Open `http://localhost:3000` — you'll be redirected to `/canvas`.
 
 **Verify:** the canvas loads with a dark command-center theme, a
 toolbar, inspector region, and status region. You can pan, zoom, and
-drag nodes (positions persist for the session). With WS configured and
-Core up, the status region should show **Live** (or **Reconnecting…**
-during blips — see [Supervisor API reference](../../reference/supervisor-api.md)
-§ WebSocket).
+drag nodes (positions persist for the session). With `NEXT_PUBLIC_DIRIJOR_WS_URL`
+set in `.env.local` and Core up, the status region should show **Live** (realtime
+`connected` — or **Reconnecting…** / **Disconnected** on blips — see
+[Supervisor API reference](../../reference/supervisor-api.md) — WebSocket).
+If the WS URL is unset, the client stays **idle** — that is expected, not a
+false "connected" when Core is up; set the variable so **Live** is meaningful.
 
 **Optional — prove the wire:** with both processes running and
 `NEXT_PUBLIC_DIRIJOR_WS_URL=ws://127.0.0.1:8000/ws/realm`, open DevTools
 → Console on `/canvas` or run `websocat ws://127.0.0.1:8000/ws/realm/local`
 and confirm the first frame is `session.hello` (`seq == 0`).
 
-**What this unlocks:** the UI concepts from
+**What this unlocks (canvas):** the UI concepts from
 [Realms](../../product/concepts/realms.md) and
 [Zero-trust](../../product/concepts/zero-trust.md) — agent cards, HITL
-gates, audit preview — are now tangible.
+gates, audit preview — are now tangible on your machine.
+
+### LAN / Next.js “Network” URL (non-loopback)
+
+If you open the canvas from a **host IP** (e.g. Next’s “Network: `http://192.168.1.5:3000`”)
+or from **another device on the LAN**, the browser’s `fetch` to
+`http://localhost:8000` targets **that client machine** — not the machine running
+the supervisor. The UI will often show **`network_error`** on spin (CORS or
+failed fetch). **Fix:** set `NEXT_PUBLIC_DIRIJOR_API_URL` and
+`NEXT_PUBLIC_DIRIJOR_WS_URL` in `frontend/.env.local` to the **supervisor
+host:port the browser can reach** (e.g. `http://192.168.1.5:8000` and
+`ws://192.168.1.5:8000/ws/realm`). The WebSocket base must end at `/ws/realm`
+(no trailing `/{realmId}`; the client appends it).
+
+**CORS (Core):** `supervisor` uses `CORSMiddleware`. Set
+`DIRIJOR_CORS_ORIGINS=comma,separated,origins` for an explicit allow-list; when
+that variable is **unset** (default dev list of loopback ports on 3000/3001) and
+`DIRIJOR_CORS_STRICT_LOCALHOST` is **not** set, an optional
+`allow_origin_regex` matches **RFC1918** + loopback **with any port** (see
+`backend/dirijor-core/supervisor.py` — `_cors_allow_origin_regex()`). If you
+set `DIRIJOR_CORS_STRICT_LOCALHOST=1` (`1` / `true` / `yes`), the regex is
+**disabled** so only `_cors_allow_origins()` applies — pair with
+`DIRIJOR_CORS_ORIGINS=...` if you need LAN dev origins. There is no `*`
+wildcard on origins in shipped defaults.
+
+---
+
+## Step 5b — Spin a realm (local-noop, golden-path success)
+
+**Why.** The minimal success signal for Core + HTTP + UI is a realm that reaches
+**`ready`** without cloud credentials (Story 2.1 **LocalNoopAdapter**).
+
+1. In the Network Canvas, use **Spin realm** (or equivalent toolbar control).
+2. Leave **adapter** empty / default — do **not** set `terraform-digitalocean`
+   and do **not** require `DIGITALOCEAN_TOKEN` for this path.
+3. Wait until the job shows **`ready`** (the hook polls; see
+   [`useRealmSpin`](../../../frontend/hooks/useRealmSpin.ts)).
+
+**Optional curl (same contract):** from the host where Core runs (**requires [`jq`](https://jqlang.github.io/jq/)** in `PATH` for the commands below):
+
+```bash
+JOB=$(curl -s -X POST http://localhost:8000/realms/spin \
+  -H 'Content-Type: application/json' \
+  -d '{"realm_description":"golden-path smoke","agent_count":3}' | jq -r .job_id)
+curl -s "http://localhost:8000/realms/$JOB" | jq
+```
+
+**What this unlocks:** the same end-to-end path the README’s HTTP samples use;
+import-from-marketplace (Story 7.2) remains optional and is not part of this
+minimal first run.
+
+---
+
+## Health smoke (script or curl)
+
+**Minimal check:** `GET /health` must return **HTTP 200** when the supervisor
+is ready.
+
+```bash
+# From repo root; default base http://localhost:8000
+./scripts/verify-golden-path.sh
+```
+
+- **Exit 0** only when `/health` is **200**; **exit 1** when Core is not ready or
+  the request fails; **exit 2** if `DIRIJOR_VERIFY_BASE` is not a bare origin (path,
+  query, fragment, or userinfo). **Requires `curl`.**
+- Optional: `DIRIJOR_VERIFY_BASE=https://host:port` — **supervisor HTTP origin
+  only** (scheme + host + port; **no** path segment after the port, **no**
+  trailing slash). The script requests `${DIRIJOR_VERIFY_BASE}/health`.
+
+Equivalent one-liner:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' http://localhost:8000/health
+# expect: 200
+```
+
+**What this unlocks (health / automation):** the same check Docker’s
+`HEALTHCHECK` uses — you can script “Core is up” before running UI or E2E steps.
 
 ---
 
@@ -275,6 +364,16 @@ operate / tear down — over real IaC adapters.
     so a supervisor that isn't running will **not** break the canvas.
     If the env var points at a dead host, expect **Reconnecting…** /
     **Disconnected** in the status region, not a blank page.
+
+??? failure "**Spin realm** shows `network_error` or never reaches `ready`"
+
+    Usually a **wrong API base** or **CORS**: confirm `NEXT_PUBLIC_DIRIJOR_API_URL`
+    in `frontend/.env.local` is the supervisor URL the **browser** can reach
+    (not `http://localhost:8000` when the canvas is opened from
+    `http://192.168.x.x:3000` — see **LAN** above). Ensure Core is up
+    (`./scripts/verify-golden-path.sh` → exit 0). If you set
+    `DIRIJOR_CORS_STRICT_LOCALHOST=1` on Core without a matching
+    `DIRIJOR_CORS_ORIGINS=...` allow-list, LAN origins can be blocked.
 
 ---
 
