@@ -94,6 +94,7 @@ nav:
           - First private realm: guides/tutorials/01-first-realm.md
   - Reference:
       - Supervisor HTTP API (v0.1): reference/supervisor-api.md
+      - "Template manifest (v1)": reference/template-manifest.md
   - Architecture:
       - Overview: architecture/overview.md
       - Observability (Grafana): observability/README.md

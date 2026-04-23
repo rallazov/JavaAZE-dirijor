@@ -266,7 +266,7 @@ wildcard on origins in shipped defaults.
 2. Leave **adapter** empty / default — do **not** set `terraform-digitalocean`
    and do **not** require `DIGITALOCEAN_TOKEN` for this path.
 3. Wait until the job shows **`ready`** (the hook polls; see
-   [`useRealmSpin`](../../../frontend/hooks/useRealmSpin.ts)).
+   [`useRealmSpin`](https://github.com/JavaAZE/JavaAZE-dirijor/blob/main/frontend/hooks/useRealmSpin.ts)).
 
 **Optional curl (same contract):** from the host where Core runs (**requires [`jq`](https://jqlang.github.io/jq/)** in `PATH` for the commands below):
 
