@@ -20,6 +20,15 @@ const REALM_OPTIONS: { id: string; label: string; disabled?: boolean }[] = [
   { id: '_soon', label: 'Additional realms…', disabled: true },
 ];
 
+/** Reject before `file.text()` to avoid large-string allocation in the tab (server has no separate cap). */
+const MAX_IMPORT_TEMPLATE_FILE_BYTES = 2 * 1024 * 1024;
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export function RealmToolbar({ className }: { className?: string }) {
   const description = useCanvasStore((s) => s.realmDescription);
   const setDescription = useCanvasStore((s) => s.setRealmDescription);
@@ -161,8 +170,21 @@ export function RealmToolbar({ className }: { className?: string }) {
               const file = e.target.files?.[0];
               e.target.value = '';
               if (!file) return;
-              setImportBusy(true);
               setImportError(null);
+              if (file.size > MAX_IMPORT_TEMPLATE_FILE_BYTES) {
+                setImportError(
+                  new ImportDraftApiError(
+                    'import_file_too_large',
+                    `Template file is ${formatBytes(file.size)}; maximum is ${formatBytes(
+                      MAX_IMPORT_TEMPLATE_FILE_BYTES
+                    )} before import.`,
+                    0,
+                    0
+                  )
+                );
+                return;
+              }
+              setImportBusy(true);
               try {
                 const text = await file.text();
                 const res = await postMarketplaceImportDraft(apiBase(), text);
