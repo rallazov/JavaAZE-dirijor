@@ -84,3 +84,32 @@ resource "digitalocean_firewall" "realm_egress" {
     }
   }
 }
+
+resource "digitalocean_ssh_key" "operator" {
+  name       = "${var.realm_name}-operator"
+  public_key = var.ssh_public_key
+}
+
+resource "digitalocean_droplet" "agent" {
+  count = var.agent_count
+
+  name     = "${var.realm_name}-agent-${count.index}"
+  size     = "s-1vcpu-512mb-10gb"
+  image    = "ubuntu-22-04-x64"
+  region   = "nyc3"
+  vpc_uuid = digitalocean_vpc.realm_vpc.id
+
+  tags = ["dirijor-realm-${var.realm_name}"]
+
+  ssh_keys = [digitalocean_ssh_key.operator.fingerprint]
+
+  backups    = false
+  monitoring = false
+  ipv6       = false
+  user_data  = ""
+
+  depends_on = [
+    digitalocean_vpc.realm_vpc,
+    digitalocean_firewall.realm_egress,
+  ]
+}

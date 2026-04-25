@@ -144,7 +144,10 @@ SERVICE_VERSION = "0.1.0"
 #     `POST /marketplace/templates/import-draft` returns `{schema_version, draft}` on
 #     200 or `{schema_version, code, detail}` on 422 (verify_template_manifest codes
 #     PARSE/SCHEMA/SIGNATURE/PINS plus `draft_agent_count_exceeded`). Not SpinError.
-SCHEMA_VERSION = 9
+#   v10 (Story 9.1, 2026-04-23) — DO private-realm module: additive
+#     `outputs.agent_droplet_ids` / `outputs.agent_private_ipv4s` (list[str]) on
+#     terraform-digitalocean spin envelope. No removals, no type changes to existing keys.
+SCHEMA_VERSION = 10
 STARTED_AT = time.monotonic()
 STARTUP_GRACE_S = 1.0
 
@@ -2416,6 +2419,7 @@ class TerraformAdapter:
             "agent_count": req.agent_count,
             "cloud_provider": "digitalocean",
             "allow_public_egress": _allow_public_egress_from_env(),
+            "ssh_public_key": os.environ.get("DIRIJOR_DO_SSH_PUBLIC_KEY", "").strip(),
         }
         tfvars_path = ws / "terraform.tfvars.json"
         tfvars_path.write_text(
@@ -2500,11 +2504,20 @@ class TerraformAdapter:
             return run
 
     async def validate(self, req: SpinRequest) -> None:
+        # Check DIGITALOCEAN_TOKEN before DIRIJOR_DO_SSH_PUBLIC_KEY so operators
+        # hitting both-missing see the token error first (Story 9.1 ordering).
         token = os.environ.get("DIGITALOCEAN_TOKEN", "").strip()
         if not token:
             raise SpinValidationError(
                 code="adapter_credentials_missing",
                 message="DIGITALOCEAN_TOKEN is not set or empty",
+                details={},
+            )
+        ssh_key = os.environ.get("DIRIJOR_DO_SSH_PUBLIC_KEY", "").strip()
+        if not ssh_key:
+            raise SpinValidationError(
+                code="adapter_credentials_missing",
+                message="DIRIJOR_DO_SSH_PUBLIC_KEY is not set or empty",
                 details={},
             )
 
@@ -2666,6 +2679,48 @@ class TerraformAdapter:
                 },
             )
 
+        def _require_output_str_list(name: str) -> list[str]:
+            block = raw_outputs.get(name)
+            if not isinstance(block, dict) or "value" not in block:
+                raise SpinValidationError(
+                    code="terraform_apply_failed",
+                    message=f"terraform output missing {name}.value",
+                    details={
+                        "step": "apply",
+                        "reason": "terraform_output_malformed",
+                        "missing_field": name,
+                    },
+                )
+            raw_list = block["value"]
+            if not isinstance(raw_list, list) or not all(
+                isinstance(x, str) for x in raw_list
+            ):
+                raise SpinValidationError(
+                    code="terraform_apply_failed",
+                    message=f"terraform output {name} is unusable",
+                    details={
+                        "step": "apply",
+                        "reason": "terraform_output_malformed",
+                        "missing_field": name,
+                    },
+                )
+            if len(raw_list) != req.agent_count:
+                raise SpinValidationError(
+                    code="terraform_apply_failed",
+                    message=(
+                        f"terraform output {name} length does not match agent_count"
+                    ),
+                    details={
+                        "step": "apply",
+                        "reason": "terraform_output_malformed",
+                        "missing_field": name,
+                    },
+                )
+            return raw_list
+
+        agent_droplet_ids = _require_output_str_list("agent_droplet_ids")
+        agent_private_ipv4s = _require_output_str_list("agent_private_ipv4s")
+
         ip_block = raw_outputs.get("realm_vpc_ip_range")
         ip_val = None
         if isinstance(ip_block, dict) and "value" in ip_block:
@@ -2683,6 +2738,8 @@ class TerraformAdapter:
             "realm_vpc_id": vpc_id,
             "realm_vpc_ip_range": ip_val,
             "mesh_endpoint": f"tf://{vpc_id}",
+            "agent_droplet_ids": agent_droplet_ids,
+            "agent_private_ipv4s": agent_private_ipv4s,
             "tf_workspace": str(ws),
             "tf_plan_digest": digest,
         }

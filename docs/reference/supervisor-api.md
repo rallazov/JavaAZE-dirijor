@@ -30,7 +30,7 @@ v0.1 supervisor exposes — no opinions, no recommendations. For the
 | Field | Value | Meaning |
 |---|---|---|
 | `SERVICE_VERSION` | `"0.1.0"` | Module constant; `FastAPI(version=...)` and every response read this. |
-| `SCHEMA_VERSION` | `9` | Contract shape version. **Story 7.2** bumped 8→9: `POST /marketplace/templates/import-draft` returns `{ schema_version, draft }` on success or `{ schema_version, code, detail }` on `422` (`PARSE` / `SCHEMA` / `SIGNATURE` / `PINS` / `draft_agent_count_exceeded` — **not** a `SpinError` envelope). Story 5.1 bumped 7→8: gated mesh bootstrap after `phase == ready` (`DIRIJOR_MESH_BOOTSTRAP_ENABLED` truthy like `DIRIJOR_AUDIT_EXPORT_ENABLED` / `DIRIJOR_SAFETY_SIGNALS_ENABLED`: `1` / `true` / `yes`); additive `outputs.mesh`, `outputs.headscale_control_url`; `POST /realms/{job_id}/mesh/preauth-key` (one-shot secret, not echoed on `GET` poll); `POST /realms/{job_id}/mesh/retry`; WebSocket `realm.mesh.state`; `SpinError` codes `mesh_bootstrap_disabled`, `mesh_preauth_consumed`, `mesh_preauth_not_eligible`, `mesh_headscale_api_error`, `mesh_retry_conflict`. Story 4.3 bumped 6→7: gated `POST /audit/export` (ZIP audit bundle); realm-scoped in-memory audit ring; new `SpinError` codes `audit_export_disabled`, `audit_export_too_large`, `audit_export_invalid_window`. Story 4.2 bumped 5→6: optional `realm_id` / `anomaly_subject_agent_id` on `POST /consensus`; `GET /safety/quarantine/{realm_id}`; gated `POST /safety/signal`; optional `anomaly_policy` readiness entry; WebSocket payloads remain existing `topology.delta` / `hitl.pending` types (additive agent fields such as `status: "quarantined"`). Story 4.1 bumped 4→5: semantic-cache HTTP + consensus cache fields + `semantic_cache` probe. Story 2.2 bumped 3→4 (`DELETE /realms/{job_id}` + destroy-related `outputs` keys + nine new `SpinError.code` values). Story 3.2 bumped 1→2 (debate loop), Story 3.3 bumped 2→3 (WebSocket channel + `realtime` block). Story 2.1 added the `realm_manager` readiness-registry dep without bumping — precedent for "dep-only additive" extensions. Story 2.3 added **`egress_policy_denied`** and Terraform egress controls **without** bumping `SCHEMA_VERSION` (env- and module-driven only). |
+| `SCHEMA_VERSION` | `10` | Contract shape version. **Story 9.1** bumped 9→10: additive `outputs.agent_droplet_ids` / `outputs.agent_private_ipv4s` (list[str]) on terraform-digitalocean ready jobs. **Story 7.2** bumped 8→9: `POST /marketplace/templates/import-draft` returns `{ schema_version, draft }` on success or `{ schema_version, code, detail }` on `422` (`PARSE` / `SCHEMA` / `SIGNATURE` / `PINS` / `draft_agent_count_exceeded` — **not** a `SpinError` envelope). Story 5.1 bumped 7→8: gated mesh bootstrap after `phase == ready` (`DIRIJOR_MESH_BOOTSTRAP_ENABLED` truthy like `DIRIJOR_AUDIT_EXPORT_ENABLED` / `DIRIJOR_SAFETY_SIGNALS_ENABLED`: `1` / `true` / `yes`); additive `outputs.mesh`, `outputs.headscale_control_url`; `POST /realms/{job_id}/mesh/preauth-key` (one-shot secret, not echoed on `GET` poll); `POST /realms/{job_id}/mesh/retry`; WebSocket `realm.mesh.state`; `SpinError` codes `mesh_bootstrap_disabled`, `mesh_preauth_consumed`, `mesh_preauth_not_eligible`, `mesh_headscale_api_error`, `mesh_retry_conflict`. Story 4.3 bumped 6→7: gated `POST /audit/export` (ZIP audit bundle); realm-scoped in-memory audit ring; new `SpinError` codes `audit_export_disabled`, `audit_export_too_large`, `audit_export_invalid_window`. Story 4.2 bumped 5→6: optional `realm_id` / `anomaly_subject_agent_id` on `POST /consensus`; `GET /safety/quarantine/{realm_id}`; gated `POST /safety/signal`; optional `anomaly_policy` readiness entry; WebSocket payloads remain existing `topology.delta` / `hitl.pending` types (additive agent fields such as `status: "quarantined"`). Story 4.1 bumped 4→5: semantic-cache HTTP + consensus cache fields + `semantic_cache` probe. Story 2.2 bumped 3→4 (`DELETE /realms/{job_id}` + destroy-related `outputs` keys + nine new `SpinError.code` values). Story 3.2 bumped 1→2 (debate loop), Story 3.3 bumped 2→3 (WebSocket channel + `realtime` block). Story 2.1 added the `realm_manager` readiness-registry dep without bumping — precedent for "dep-only additive" extensions. Story 2.3 added **`egress_policy_denied`** and Terraform egress controls **without** bumping `SCHEMA_VERSION` (env- and module-driven only). |
 
 ### Marketplace / template manifest (Story 7.1 library + Story 7.2 HTTP)
 
@@ -108,7 +108,7 @@ Pydantic model: `RootStatus`.
 {
   "service": "dirijor-supervisor",
   "version": "0.1.0",
-  "schema_version": 9,
+  "schema_version": 10,
   "status": "operational",
   "consensus_engine": "ready",
   "uptime_s": 12.4,
@@ -124,7 +124,7 @@ Pydantic model: `RootStatus`.
   "realtime": {
     "connections": 0,
     "heartbeat_interval_s": 15.0,
-    "schema_version": 9
+    "schema_version": 10
   }
 }
 ```
@@ -158,7 +158,7 @@ Pydantic model: `HealthStatus`.
 {
   "status": "ok",
   "version": "0.1.0",
-  "schema_version": 9,
+  "schema_version": 10,
   "uptime_s": 12.4,
   "timestamp": "2026-04-16T10:12:44.117Z",
   "checks": {
@@ -184,7 +184,7 @@ status code and `status` field differ.
 {
   "status": "degraded",
   "version": "0.1.0",
-  "schema_version": 9,
+  "schema_version": 10,
   "uptime_s": 342.0,
   "timestamp": "2026-04-16T10:18:02.554Z",
   "checks": {
@@ -500,7 +500,7 @@ unzip -l audit-bundle.zip
 
 ```json
 {
-  "schema_version": 9,
+  "schema_version": 10,
   "draft": {
     "agent_count": 3,
     "realm_description": "Imported template: my-tpl @ 1.0.0",
@@ -524,7 +524,7 @@ Same envelope for verification failures and draft rules:
 
 ```json
 {
-  "schema_version": 9,
+  "schema_version": 10,
   "code": "SCHEMA",
   "detail": "…"
 }
@@ -631,10 +631,10 @@ additive change and requires updating this page in the same PR.
 | `terraform_init_failed`      | _on job surface_ | `terraform init` non-zero; `details.step`, `details.exit_code`, `details.stderr_preview` (scrubbed). |
 | `terraform_validate_failed`  | _on job surface_ | `terraform validate` non-zero. |
 | `terraform_plan_failed`      | _on job surface_ | `terraform plan` non-zero. |
-| `terraform_apply_failed`     | _on job surface_ | `terraform apply` non-zero or malformed `terraform output -json` after apply; may include `details.partial_apply`. `details.reason` is `terraform_output_malformed` (bad JSON / missing `realm_vpc_id`) or `terraform_output_failed` (non-zero `terraform output` exit after successful apply). |
+| `terraform_apply_failed`     | _on job surface_ | `terraform apply` non-zero or malformed `terraform output -json` after apply; may include `details.partial_apply`. `details.reason` is `terraform_output_malformed` (bad JSON / missing `realm_vpc_id` / missing or unusable `agent_droplet_ids` / `agent_private_ipv4s` — see `details.missing_field`) or `terraform_output_failed` (non-zero `terraform output` exit after successful apply). |
 | `terraform_destroy_failed`   | _on job surface_ / nested in `outputs.destroy_error` | `terraform destroy` non-zero on the DELETE path. |
 | `terraform_command_timeout`  | _on job surface_ | Subprocess exceeded `DIRIJOR_TERRAFORM_CMD_TIMEOUT_S`. |
-| `adapter_credentials_missing`| _on job surface_ | `DIGITALOCEAN_TOKEN` missing at validate time. |
+| `adapter_credentials_missing`| _on job surface_ | `DIGITALOCEAN_TOKEN` or **`DIRIJOR_DO_SSH_PUBLIC_KEY`** missing / empty at `terraform-digitalocean` `validate` time (`SpinError.message` names which). |
 | `egress_policy_denied`       | _on job surface_ | Pre-provision egress policy hook denied the spin (`validate` / `provision` only — not `destroy`). `details.reason` (e.g. `policy_hook`), `details.policy_id` (e.g. `egress-default-v0`), `details.adapter`. **`DIRIJOR_EGRESS_POLICY_DENY`** is recognized only when the value trims to exactly **`1`** (unlike **`DIRIJOR_ALLOW_PUBLIC_EGRESS`**, which treats `1` / `true` / `yes` / `on` as truthy). |
 | `destroy_invalid_state`      | `409` | `DELETE` when `phase != "ready"`. `details.current_phase`. |
 | `destroy_already_requested`  | `409` | Second `DELETE` while destroy is in flight. `details.destroy_requested_at`. |
@@ -665,12 +665,22 @@ When registered at process start (requires non-empty **`DIGITALOCEAN_TOKEN`**
 and a terraform binary on **`PATH`** or at **`DIRIJOR_TERRAFORM_BINARY`**),
 `adapter_hint: "terraform-digitalocean"` runs `terraform init → validate →
 plan → apply` in a per-realm workspace under **`DIRIJOR_TERRAFORM_WORKSPACE_ROOT`**
-(default: `<temp>/dirijor/terraform-workspaces/<realm_id>/`). The adapter is
-wrapped by **`EgressPolicyRealmAdapter`** (Story 2.3) so a composable policy hook
-runs before `validate` / `provision`. Ready `outputs` include `realm_vpc_id`,
+(default: `<temp>/dirijor/terraform-workspaces/<realm_id>/`). **Story 9.1**
+also requires **`DIRIJOR_DO_SSH_PUBLIC_KEY`** (operator OpenSSH public key) at
+`validate` / `provision`; it is written to `terraform.tfvars.json` as
+`ssh_public_key` (**not** via `TF_VAR_*`). The adapter is wrapped by
+**`EgressPolicyRealmAdapter`** (Story 2.3) so a composable policy hook runs
+before `validate` / `provision`. Ready `outputs` include `realm_vpc_id`,
 `realm_vpc_ip_range`, `mesh_endpoint` (`tf://<vpc_id>` **placeholder preserved**
 for backward compatibility; Story 5.1 adds `headscale_control_url` + `mesh`
-when bootstrap is enabled), `tf_workspace`, `tf_plan_digest`.
+when bootstrap is enabled), **`agent_droplet_ids`**, **`agent_private_ipv4s`**
+(Story 9.1 — DO droplet ids and private VPC IPv4s, length `agent_count`),
+`tf_workspace`, `tf_plan_digest`.
+
+| SpinJob `outputs` key (terraform-digitalocean) | Type | Notes |
+|---|---|---|
+| `agent_droplet_ids` | `list[str]` | DigitalOcean droplet resource ids, `count.index` order. Absent for `local-noop`. |
+| `agent_private_ipv4s` | `list[str]` | Private IPv4s on the realm VPC. Absent for `local-noop`. |
 
 **Egress posture (Story 2.3):** the copied `terraform/modules/private-realm`
 module applies a DigitalOcean Cloud Firewall with **default-deny outbound to
@@ -741,7 +751,7 @@ Pydantic model: `SpinJob`.
     "agent_count":   3
   },
   "error":          null,
-  "schema_version": 9
+  "schema_version": 10
 }
 ```
 
@@ -827,7 +837,7 @@ same **`DIRIJOR_MESH_BOOTSTRAP_ENABLED`** gate as automatic bootstrap.
 
 | Code | When |
 |---|---|
-| `200` | `{ "status": "accepted", "schema_version": 9 }` — poll `GET` for updated `outputs.mesh`. |
+| `200` | `{ "status": "accepted", "schema_version": 10 }` — poll `GET` for updated `outputs.mesh`. |
 | `403` | Mesh feature gate off. |
 | `404` | Unknown job. |
 | `409` | Not `phase == ready` or destroy active. |
@@ -905,7 +915,7 @@ Core remains HTTP POST).
 ```json
 {
   "type": "topology.delta",
-  "schema_version": 9,
+  "schema_version": 10,
   "realm_id": "demo",
   "ts": "2026-04-16T10:12:44.117Z",
   "seq": 3,
@@ -994,7 +1004,7 @@ Tests cover:
 - `test_health_ok_when_ready`, `test_health_503_when_required_dep_degraded`, `test_health_never_500s_when_probe_raises`, `test_health_includes_realtime_channel_dep`
 - `test_registry_contains_required_dependencies`
 - `test_consensus_smoke`, `test_consensus_degraded_keeps_v01_key_set`
-- `test_schema_version_pinned`, `test_schema_version_is_9` (fail loudly if someone bumps `SCHEMA_VERSION` without updating this page)
+- `test_schema_version_pinned`, `test_schema_version_is_10` (fail loudly if someone bumps `SCHEMA_VERSION` without updating this page)
 - Story 5.1 mesh: `test_mesh_bootstrap.py` (gate off/on, Headscale `MockTransport`, preauth one-shot, retry, WS broadcast)
 - Story 4.2 safety suite: `test_safety_quarantine.py` (policy load, consensus + signal hooks, HTTP list, realm isolation, `broadcast_event` unknown-type regression)
 - Story 4.3 audit export: `test_audit_export.py` (export gate, half-open filtering, 413 oversize, manifest digests, quarantine audit idempotency, ring eviction log)

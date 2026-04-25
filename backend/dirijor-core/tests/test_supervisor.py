@@ -242,15 +242,15 @@ def test_schema_version_pinned():
     """Loud regression guard — bumping SCHEMA_VERSION requires deliberately
     updating this test AND README sample payloads (Story 3.1 AC 5,
     Story 3.2 AC 5, Story 3.3 AC 7, Story 2.2 AC 10)."""
-    assert supervisor.SCHEMA_VERSION == 9
+    assert supervisor.SCHEMA_VERSION == 10
     assert supervisor.SERVICE_VERSION == "0.1.0"
 
 
-def test_schema_version_is_9():
-    """Explicit belt-and-braces pin — Story 7.2 bumped 8 → 9. If a future
+def test_schema_version_is_10():
+    """Explicit belt-and-braces pin — Story 9.1 bumped 9 → 10. If a future
     story bumps SCHEMA_VERSION again, BOTH this test and
     `test_schema_version_pinned` must be updated together."""
-    assert supervisor.SCHEMA_VERSION == 9
+    assert supervisor.SCHEMA_VERSION == 10
 
 
 # --- Story 3.2 AC 1–4, AC 7 (new debate-loop coverage) ----------------------
@@ -1223,6 +1223,15 @@ def test_root_includes_realtime_block():
 
 # --- Story 2.2 (Terraform adapter) --------------------------------------------
 
+_TF_TEST_SSH_PUB = (
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDEtestkeydev9oneonlyplaceholder"
+)
+
+
+def _patch_terraform_do_spin_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    monkeypatch.setenv("DIRIJOR_DO_SSH_PUBLIC_KEY", _TF_TEST_SSH_PUB)
+
 
 def _tf_output_stdout() -> str:
     return json.dumps(
@@ -1234,6 +1243,14 @@ def _tf_output_stdout() -> str:
             "realm_vpc_ip_range": {
                 "value": "10.10.0.0/16",
                 "type": "string",
+            },
+            "agent_droplet_ids": {
+                "value": ["d1", "d2", "d3"],
+                "type": ["tuple", ["string", "string", "string"]],
+            },
+            "agent_private_ipv4s": {
+                "value": ["10.10.0.2", "10.10.0.3", "10.10.0.4"],
+                "type": ["tuple", ["string", "string", "string"]],
             },
         }
     )
@@ -1276,7 +1293,7 @@ def _tf_env_provider() -> dict[str, str]:
 
 
 def test_terraform_adapter_registered_when_token_and_binary_present(monkeypatch):
-    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    _patch_terraform_do_spin_env(monkeypatch)
     monkeypatch.setattr(supervisor.shutil, "which", lambda b: "/usr/local/bin/terraform")
     adapter = supervisor._build_terraform_adapter()
     assert adapter is not None
@@ -1290,14 +1307,14 @@ def test_terraform_adapter_skipped_when_token_absent(monkeypatch):
 
 
 def test_terraform_adapter_skipped_when_binary_missing(monkeypatch):
-    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    _patch_terraform_do_spin_env(monkeypatch)
     monkeypatch.setattr(supervisor.shutil, "which", lambda b: None)
     monkeypatch.setenv("DIRIJOR_TERRAFORM_BINARY", "/nonexistent/terraform")
     assert supervisor._build_terraform_adapter() is None
 
 
 def test_spin_terraform_adapter_accepts_and_returns_202(monkeypatch, tmp_path):
-    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    _patch_terraform_do_spin_env(monkeypatch)
     stub = _StubTerraformRunner()
     tf = supervisor.TerraformAdapter(
         workspace_root=tmp_path,
@@ -1331,7 +1348,7 @@ def test_spin_terraform_adapter_accepts_and_returns_202(monkeypatch, tmp_path):
 
 
 def test_spin_terraform_lifecycle_progresses_to_ready(monkeypatch, tmp_path):
-    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    _patch_terraform_do_spin_env(monkeypatch)
     stub = _StubTerraformRunner()
     tf = supervisor.TerraformAdapter(
         workspace_root=tmp_path,
@@ -1372,11 +1389,17 @@ def test_spin_terraform_lifecycle_progresses_to_ready(monkeypatch, tmp_path):
         assert final["outputs"]["adapter"] == "terraform-digitalocean"
         assert final["outputs"]["mesh_endpoint"].startswith("tf://")
         assert final["outputs"]["realm_vpc_id"]
+        assert final["outputs"]["agent_droplet_ids"] == ["d1", "d2", "d3"]
+        assert final["outputs"]["agent_private_ipv4s"] == [
+            "10.10.0.2",
+            "10.10.0.3",
+            "10.10.0.4",
+        ]
         assert isinstance(final["outputs"]["tf_workspace"], str)
 
 
 def test_spin_terraform_invokes_commands_in_order(monkeypatch, tmp_path):
-    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    _patch_terraform_do_spin_env(monkeypatch)
     stub = _StubTerraformRunner()
     tf = supervisor.TerraformAdapter(
         workspace_root=tmp_path,
@@ -1427,7 +1450,7 @@ def test_spin_terraform_invokes_commands_in_order(monkeypatch, tmp_path):
 def test_spin_terraform_init_failure_surfaces_terraform_init_failed(
     monkeypatch, tmp_path
 ):
-    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    _patch_terraform_do_spin_env(monkeypatch)
     stub = _StubTerraformRunner()
     stub.queue["init"] = supervisor.CompletedRun(1, "", "init failed hard", 0.01)
     tf = supervisor.TerraformAdapter(
@@ -1472,7 +1495,7 @@ def test_spin_terraform_init_failure_surfaces_terraform_init_failed(
 def test_spin_terraform_validate_failure_surfaces_terraform_validate_failed(
     monkeypatch, tmp_path
 ):
-    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    _patch_terraform_do_spin_env(monkeypatch)
     stub = _StubTerraformRunner()
     stub.queue["validate"] = supervisor.CompletedRun(1, "", "validate bad", 0.01)
     tf = supervisor.TerraformAdapter(
@@ -1515,7 +1538,7 @@ def test_spin_terraform_validate_failure_surfaces_terraform_validate_failed(
 def test_spin_terraform_plan_failure_surfaces_terraform_plan_failed(
     monkeypatch, tmp_path
 ):
-    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    _patch_terraform_do_spin_env(monkeypatch)
     stub = _StubTerraformRunner()
     stub.queue["plan"] = supervisor.CompletedRun(1, "", "plan bad", 0.01)
     tf = supervisor.TerraformAdapter(
@@ -1558,7 +1581,7 @@ def test_spin_terraform_plan_failure_surfaces_terraform_plan_failed(
 def test_spin_terraform_apply_failure_surfaces_terraform_apply_failed(
     monkeypatch, tmp_path
 ):
-    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    _patch_terraform_do_spin_env(monkeypatch)
     stub = _StubTerraformRunner()
     stub.queue["apply"] = supervisor.CompletedRun(1, "", "apply bad", 0.01)
     tf = supervisor.TerraformAdapter(
@@ -1600,7 +1623,7 @@ def test_spin_terraform_apply_failure_surfaces_terraform_apply_failed(
 
 
 def test_spin_terraform_apply_failure_scrubs_do_pat_tokens(monkeypatch, tmp_path):
-    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    _patch_terraform_do_spin_env(monkeypatch)
     token = "do_pat_" + "a" * 64
     stub = _StubTerraformRunner()
     stub.queue["apply"] = supervisor.CompletedRun(
@@ -1647,7 +1670,7 @@ def test_spin_terraform_apply_failure_scrubs_do_pat_tokens(monkeypatch, tmp_path
 def test_spin_terraform_command_timeout_surfaces_terraform_command_timeout(
     monkeypatch, tmp_path
 ):
-    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    _patch_terraform_do_spin_env(monkeypatch)
     stub = _StubTerraformRunner()
     stub.raise_on["plan"] = TimeoutError()
     tf = supervisor.TerraformAdapter(
@@ -1727,12 +1750,57 @@ def test_spin_terraform_credentials_missing_at_validate_time_surfaces_adapter_cr
                 final = body
                 break
     assert final["error"]["code"] == "adapter_credentials_missing"
+    assert "DIGITALOCEAN_TOKEN" in final["error"]["message"]
+    assert "DIRIJOR_DO_SSH_PUBLIC_KEY" not in final["error"]["message"]
+
+
+def test_spin_terraform_credentials_ssh_missing_at_validate_surfaces_adapter_credentials_missing(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    monkeypatch.delenv("DIRIJOR_DO_SSH_PUBLIC_KEY", raising=False)
+    stub = _StubTerraformRunner()
+    tf = supervisor.TerraformAdapter(
+        workspace_root=tmp_path,
+        subprocess_runner=stub,
+        env_provider=supervisor._default_env_provider,
+        module_source=tmp_path / "mod",
+    )
+    (tmp_path / "mod").mkdir()
+    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
+    monkeypatch.setattr(
+        supervisor,
+        "_ADAPTERS",
+        {
+            "local-noop": supervisor._ADAPTERS["local-noop"],
+            "terraform-digitalocean": tf,
+        },
+    )
+    _clear_spin_state()
+    with TestClient(supervisor.app) as local_client:
+        resp = local_client.post(
+            "/realms/spin",
+            json={
+                "realm_description": "no ssh key",
+                "adapter_hint": "terraform-digitalocean",
+            },
+        )
+        job_id = resp.json()["job_id"]
+        final: dict = {}
+        for _ in range(400):
+            time.sleep(0.005)
+            body = local_client.get(f"/realms/{job_id}").json()
+            if body["phase"] in ("ready", "failed"):
+                final = body
+                break
+    assert final["error"]["code"] == "adapter_credentials_missing"
+    assert "DIRIJOR_DO_SSH_PUBLIC_KEY" in final["error"]["message"]
 
 
 def test_destroy_on_ready_job_returns_202_and_runs_terraform_destroy(
     monkeypatch, tmp_path
 ):
-    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    _patch_terraform_do_spin_env(monkeypatch)
     stub = _StubTerraformRunner()
     tf = supervisor.TerraformAdapter(
         workspace_root=tmp_path,
@@ -1885,7 +1953,7 @@ def test_delete_realm_job_500_when_adapter_not_registered():
 def test_destroy_failure_surfaces_terraform_destroy_failed_in_outputs(
     monkeypatch, tmp_path
 ):
-    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    _patch_terraform_do_spin_env(monkeypatch)
     stub = _StubTerraformRunner()
     stub.queue["destroy"] = supervisor.CompletedRun(1, "", "destroy failed", 0.01)
     tf = supervisor.TerraformAdapter(
@@ -1934,7 +2002,7 @@ def test_destroy_failure_surfaces_terraform_destroy_failed_in_outputs(
 def test_spin_terraform_malformed_output_json_surfaces_terraform_apply_failed(
     monkeypatch, tmp_path
 ):
-    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    _patch_terraform_do_spin_env(monkeypatch)
     stub = _StubTerraformRunner()
     stub.queue["output"] = supervisor.CompletedRun(0, "{not-json", "", 0.01)
     tf = supervisor.TerraformAdapter(
@@ -1978,7 +2046,7 @@ def test_spin_terraform_malformed_output_json_surfaces_terraform_apply_failed(
 def test_spin_terraform_output_step_nonzero_surfaces_terraform_apply_failed(
     monkeypatch, tmp_path
 ):
-    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    _patch_terraform_do_spin_env(monkeypatch)
     stub = _StubTerraformRunner()
     stub.queue["output"] = supervisor.CompletedRun(1, "", "output cmd failed", 0.01)
     tf = supervisor.TerraformAdapter(
@@ -2026,6 +2094,7 @@ def test_terraform_write_tfvars_allow_public_egress_default_false(
     monkeypatch, tmp_path
 ):
     monkeypatch.delenv("DIRIJOR_ALLOW_PUBLIC_EGRESS", raising=False)
+    monkeypatch.setenv("DIRIJOR_DO_SSH_PUBLIC_KEY", _TF_TEST_SSH_PUB)
     stub = _StubTerraformRunner()
     tf = supervisor.TerraformAdapter(
         workspace_root=tmp_path,
@@ -2040,11 +2109,18 @@ def test_terraform_write_tfvars_allow_public_egress_default_false(
     req = supervisor.SpinRequest(realm_description="d", agent_count=2)
     tf._write_tfvars(ws, req, "realm-abc")
     data = json.loads((ws / "terraform.tfvars.json").read_text())
-    assert data["allow_public_egress"] is False
+    assert data == {
+        "agent_count": 2,
+        "allow_public_egress": False,
+        "cloud_provider": "digitalocean",
+        "realm_name": "realm-abc",
+        "ssh_public_key": _TF_TEST_SSH_PUB,
+    }
 
 
 def test_terraform_write_tfvars_allow_public_egress_from_env(monkeypatch, tmp_path):
     monkeypatch.setenv("DIRIJOR_ALLOW_PUBLIC_EGRESS", "1")
+    monkeypatch.setenv("DIRIJOR_DO_SSH_PUBLIC_KEY", _TF_TEST_SSH_PUB)
     stub = _StubTerraformRunner()
     tf = supervisor.TerraformAdapter(
         workspace_root=tmp_path,
@@ -2059,7 +2135,13 @@ def test_terraform_write_tfvars_allow_public_egress_from_env(monkeypatch, tmp_pa
     req = supervisor.SpinRequest(realm_description="d", agent_count=2)
     tf._write_tfvars(ws, req, "realm-xyz")
     data = json.loads((ws / "terraform.tfvars.json").read_text())
-    assert data["allow_public_egress"] is True
+    assert data == {
+        "agent_count": 2,
+        "allow_public_egress": True,
+        "cloud_provider": "digitalocean",
+        "realm_name": "realm-xyz",
+        "ssh_public_key": _TF_TEST_SSH_PUB,
+    }
 
 
 def test_spin_validation_error_accepts_egress_policy_denied():
@@ -2072,7 +2154,7 @@ def test_spin_validation_error_accepts_egress_policy_denied():
 
 
 def test_spin_egress_policy_denied_when_env_set(monkeypatch, tmp_path):
-    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    _patch_terraform_do_spin_env(monkeypatch)
     monkeypatch.setenv("DIRIJOR_EGRESS_POLICY_DENY", "1")
     stub = _StubTerraformRunner()
     inner = supervisor.TerraformAdapter(
@@ -2150,7 +2232,7 @@ def test_terraform_adapter_invalid_cmd_timeout_env_falls_back(monkeypatch, tmp_p
 
 
 def test_terraform_destroy_rejects_workspace_outside_root(monkeypatch, tmp_path):
-    monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
+    _patch_terraform_do_spin_env(monkeypatch)
     stub = _StubTerraformRunner()
     tf = supervisor.TerraformAdapter(
         workspace_root=tmp_path / "wr",

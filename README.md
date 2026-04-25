@@ -95,7 +95,7 @@ consensus bodies into span attributes (the implementation follows this rule).
 {
   "service": "dirijor-supervisor",
   "version": "0.1.0",
-  "schema_version": 9,
+  "schema_version": 10,
   "status": "operational",
   "consensus_engine": "ready",
   "uptime_s": 12.4,
@@ -111,7 +111,7 @@ consensus bodies into span attributes (the implementation follows this rule).
   "realtime": {
     "connections": 0,
     "heartbeat_interval_s": 15.0,
-    "schema_version": 9
+    "schema_version": 10
   }
 }
 ```
@@ -122,7 +122,7 @@ consensus bodies into span attributes (the implementation follows this rule).
 {
   "status": "ok",
   "version": "0.1.0",
-  "schema_version": 9,
+  "schema_version": 10,
   "uptime_s": 12.4,
   "timestamp": "2026-04-16T10:12:44.117Z",
   "checks": {

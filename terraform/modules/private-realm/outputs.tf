@@ -15,3 +15,11 @@ output "realm_region" {
 output "realm_firewall_id" {
   value = digitalocean_firewall.realm_egress.id
 }
+
+output "agent_droplet_ids" {
+  value = digitalocean_droplet.agent[*].id
+}
+
+output "agent_private_ipv4s" {
+  value = digitalocean_droplet.agent[*].ipv4_address_private
+}
