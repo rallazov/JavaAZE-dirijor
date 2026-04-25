@@ -27,10 +27,46 @@ traffic). Adjust in a dedicated story if public ingress is required.
 **Tag:** `dirijor-realm-<realm_name>` — attach droplets / workers to this tag in
 later stories so the firewall applies.
 
+## Compute (Story 9.1)
+
+- **`var.ssh_public_key`** (required, no default) — operator OpenSSH public key;
+  the supervisor reads **`DIRIJOR_DO_SSH_PUBLIC_KEY`** and writes it to
+  `terraform.tfvars.json`. Blank values fail module validation.
+- **`digitalocean_ssh_key.operator`** — per-realm key resource named
+  `${var.realm_name}-operator` (destroyed with the realm).
+- **`digitalocean_droplet.agent`** — `count = var.agent_count`, pinned
+  **`size`** `s-1vcpu-512mb-10gb`, **`image`** `ubuntu-22-04-x64`, **`region`**
+  `nyc3` (must match the VPC). Tags **`["dirijor-realm-${var.realm_name}"]`**
+  (byte-identical to the Story 2.3 firewall) so droplets inherit default-deny
+  egress unless **`var.allow_public_egress`** is true. **`user_data`** is
+  rendered with **`templatefile("cloud-init/agent.yaml.tftpl", { ... })`**
+  (Story 9.2) — one preauth per `count.index`.
+- **Outputs:** `agent_droplet_ids`, `agent_private_ipv4s` (splat over
+  `digitalocean_droplet.agent`, `count.index` order).
+
+**Out of scope here:** Story 9.4 (supervisor-in-mesh private callback path).
+
+## Bootstrapping agents (Story 9.2)
+
+**New variables (supervisor writes to `terraform.tfvars.json` alongside Story 2.2 / 9.1 fields):**
+
+| Variable | `sensitive` | Notes |
+|----------|-------------|--------|
+| `headscale_login_url` | no | TLS base for `tailscale up --login-server=`. Aligned with supervisor `control_plane_base_url()` (typically `DIRIJOR_HEADSCALE_PUBLIC_URL` or API URL without `/api/v1`). |
+| `wrapper_image` | no | **OpenClaw** wrapper image; supervisor reads **`DIRIJOR_AGENT_WRAPPER_IMAGE`**. The image must be pullable by a fresh droplet without interactive `docker login`; use a public image, pre-baked registry credentials, or a private mirror reachable under your egress posture. |
+| `agent_preauth_keys` | **yes** | `list(string)`, **length = `var.agent_count`**. One-shot Headscale preauth per droplet; minted in Core **before** `terraform plan/apply` so the first droplet boot can enroll. Re-apply of the same job mints a fresh set (droplets may be replaced if `user_data` changes). |
+
+**Cloud-init outline (Ubuntu 22.04):** `apt` install **`ca-certificates`**, **`curl`**, and **`docker.io`**; install Tailscale via **`https://tailscale.com/install.sh`**; write preauth to **`/root/dirijor-preauth`** (mode **0600**); **`tailscale up`** with `--login-server`, `--authkey` from the file, `--advertise-tags=tag:dirijor:realm:<realm_id>`; **`docker pull` / `docker run --net=host`** for the wrapper. No `set -x` / no `echo` of secrets. Hardened environments should replace the public install-script path with a vetted package mirror or pre-baked base image.
+
+**Headscale / firewall reachability:** with **`allow_public_egress: false`**, the droplet can only use RFC1918 destinations unless you add a narrow path. That blocks **`tailscale.com`**, the Headscale public URL, and most package mirrors unless you use a **private** `headscale_login_url` and operator-built images, or you temporarily set **`allow_public_egress: true`** (see ADR-0004 and sprint notes). This is a deployment choice — document the chosen path for your environment.
+
+**Security:** preauth material exists in Terraform state and `user_data` (as today for `do_token`). Per-realm workspaces under **`DIRIJOR_TERRAFORM_WORKSPACE_ROOT`** are ephemeral; restrict access. Keys are not returned on **`GET /realms/{job_id}`**.
+
 ## Scope
 
-- **In scope:** one `digitalocean_vpc`, one `digitalocean_firewall`, outputs for
-  VPC id, CIDR, region, firewall id.
+- **In scope:** one `digitalocean_vpc`, one `digitalocean_firewall`, Story 9.1
+  compute (`ssh_key` + `agent` droplets), outputs for VPC id, CIDR, region,
+  firewall id, droplet ids, private IPv4 list.
 - **Story 5.1:** supervisor-side Headscale enrollment after spin (`outputs.mesh_endpoint`
   placeholder preserved; see `docs/reference/supervisor-api.md`) — this Terraform module is unchanged.
 - **Story 5.3:** Firecracker-capable host droplets inside the VPC.

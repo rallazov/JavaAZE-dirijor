@@ -145,7 +145,10 @@ SERVICE_VERSION = "0.1.0"
 #     `POST /marketplace/templates/import-draft` returns `{schema_version, draft}` on
 #     200 or `{schema_version, code, detail}` on 422 (verify_template_manifest codes
 #     PARSE/SCHEMA/SIGNATURE/PINS plus `draft_agent_count_exceeded`). Not SpinError.
-SCHEMA_VERSION = 9
+#   v10 (Story 9.1, 2026-04-23) — DO private-realm module: additive
+#     `outputs.agent_droplet_ids` / `outputs.agent_private_ipv4s` (list[str]) on
+#     terraform-digitalocean spin envelope. No removals, no type changes to existing keys.
+SCHEMA_VERSION = 10
 STARTED_AT = time.monotonic()
 STARTUP_GRACE_S = 1.0
 
@@ -2345,6 +2348,13 @@ _DO_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"do_v1_[A-Za-z0-9]{64}"), "do_v1_<REDACTED>"),
     (re.compile(r"DIGITALOCEAN_TOKEN=\S+"), "DIGITALOCEAN_TOKEN=<REDACTED>"),
     (re.compile(r'"token"\s*:\s*"[^"]+"'), '"token": "<REDACTED>"'),
+    # Headscale / tailscale one-shot preauth (Story 9.2 — must not land in log previews).
+    (re.compile(r"hskey:[A-Za-z0-9_\-]+"), "hskey:<REDACTED>"),
+    (re.compile(r'"authkey":\s*"[^"]+"'), '"authkey": "<REDACTED>"'),
+    (
+        re.compile(r'"agent_preauth_keys":\s*\[[^\]]+\]'),
+        '"agent_preauth_keys": ["<REDACTED>"]',
+    ),
 )
 
 
@@ -2420,12 +2430,29 @@ class TerraformAdapter:
             self._module_source, ws, dirs_exist_ok=True, symlinks=False
         )
 
-    def _write_tfvars(self, ws: Path, req: SpinRequest, realm_id: str) -> None:
+    def _write_tfvars(
+        self,
+        ws: Path,
+        req: SpinRequest,
+        realm_id: str,
+        *,
+        agent_preauth_keys: list[str],
+    ) -> None:
+        # Never place preauth material on `SpinJob.outputs` or HTTP GET — tfvars
+        # and Terraform state only (Story 9.2).
+        headscale_login_url = (
+            mesh_bootstrap_lib.control_plane_base_url()
+        )
+        wrapper_image = os.environ.get("DIRIJOR_AGENT_WRAPPER_IMAGE", "").strip()
         payload = {
-            "realm_name": realm_id,
             "agent_count": req.agent_count,
-            "cloud_provider": "digitalocean",
+            "agent_preauth_keys": agent_preauth_keys,
             "allow_public_egress": _allow_public_egress_from_env(),
+            "cloud_provider": "digitalocean",
+            "headscale_login_url": headscale_login_url,
+            "realm_name": realm_id,
+            "ssh_public_key": os.environ.get("DIRIJOR_DO_SSH_PUBLIC_KEY", "").strip(),
+            "wrapper_image": wrapper_image,
         }
         tfvars_path = ws / "terraform.tfvars.json"
         tfvars_path.write_text(
@@ -2436,6 +2463,29 @@ class TerraformAdapter:
     def _merge_env(self) -> dict[str, str]:
         base = dict(self._env_provider())
         return {**dict(os.environ), **base}
+
+    async def _mint_agent_preauth_key_list(
+        self, req: SpinRequest, job: SpinJob
+    ) -> list[str]:
+        """Mint one Headscale one-shot preauth key per droplet before apply."""
+        api_url = os.environ.get("DIRIJOR_HEADSCALE_API_URL", "").strip().rstrip("/")
+        api_key = os.environ.get("DIRIJOR_HEADSCALE_API_KEY", "").strip()
+        headers = {"Authorization": f"Bearer {api_key}"}
+        out: list[str] = []
+        async with httpx.AsyncClient(
+            base_url=api_url, headers=headers, timeout=30.0
+        ) as hs_client:
+            user_id = await mesh_bootstrap_lib.ensure_realm_user(
+                hs_client, job.realm_id, aborted=lambda: False
+            )
+            for _ in range(req.agent_count):
+                key, _exp = await mesh_bootstrap_lib.issue_preauth_key(
+                    user_id=user_id,
+                    realm_id=job.realm_id,
+                    client=hs_client,
+                )
+                out.append(key)
+        return out
 
     async def _run_step(
         self,
@@ -2510,6 +2560,8 @@ class TerraformAdapter:
             return run
 
     async def validate(self, req: SpinRequest) -> None:
+        # Check DIGITALOCEAN_TOKEN before DIRIJOR_DO_SSH_PUBLIC_KEY so operators
+        # hitting both-missing see the token error first (Story 9.1 ordering).
         token = os.environ.get("DIGITALOCEAN_TOKEN", "").strip()
         if not token:
             raise SpinValidationError(
@@ -2517,12 +2569,61 @@ class TerraformAdapter:
                 message="DIGITALOCEAN_TOKEN is not set or empty",
                 details={},
             )
+        ssh_key = os.environ.get("DIRIJOR_DO_SSH_PUBLIC_KEY", "").strip()
+        if not ssh_key:
+            raise SpinValidationError(
+                code="adapter_credentials_missing",
+                message="DIRIJOR_DO_SSH_PUBLIC_KEY is not set or empty",
+                details={},
+            )
+        if not mesh_bootstrap_lib.mesh_bootstrap_enabled():
+            raise SpinValidationError(
+                code="adapter_credentials_missing",
+                message=(
+                    "DIRIJOR_MESH_BOOTSTRAP_ENABLED must be truthy for "
+                    "terraform-digitalocean (agent droplets require pre-apply "
+                    "mesh join — Story 9.2)"
+                ),
+                details={},
+            )
+        if not mesh_bootstrap_lib.headscale_credentials_configured():
+            raise SpinValidationError(
+                code="adapter_credentials_missing",
+                message=(
+                    "DIRIJOR_HEADSCALE_API_URL and DIRIJOR_HEADSCALE_API_KEY are "
+                    "required for terraform-digitalocean (Story 9.2)"
+                ),
+                details={},
+            )
+        if not (mesh_bootstrap_lib.control_plane_base_url() or "").strip():
+            raise SpinValidationError(
+                code="adapter_credentials_missing",
+                message=(
+                    "Set DIRIJOR_HEADSCALE_PUBLIC_URL or a usable "
+                    "DIRIJOR_HEADSCALE_API_URL (headscale base URL for "
+                    "`headscale_login_url` / cloud-init — Story 9.2)"
+                ),
+                details={},
+            )
+        w_img = os.environ.get("DIRIJOR_AGENT_WRAPPER_IMAGE", "").strip()
+        if not w_img:
+            raise SpinValidationError(
+                code="adapter_credentials_missing",
+                message=(
+                    "DIRIJOR_AGENT_WRAPPER_IMAGE is required for "
+                    "terraform-digitalocean (OpenClaw wrapper image — Story 9.2)"
+                ),
+                details={},
+            )
 
     async def provision(self, req: SpinRequest, job: SpinJob) -> dict[str, Any]:
         await self.validate(req)
+        preauth_keys = await self._mint_agent_preauth_key_list(req, job)
         ws = self._ws_for(job.realm_id)
         self._copy_module(ws)
-        self._write_tfvars(ws, req, job.realm_id)
+        self._write_tfvars(
+            ws, req, job.realm_id, agent_preauth_keys=preauth_keys
+        )
         env = self._merge_env()
 
         r_init = await self._run_step(
@@ -2676,6 +2777,48 @@ class TerraformAdapter:
                 },
             )
 
+        def _require_output_str_list(name: str) -> list[str]:
+            block = raw_outputs.get(name)
+            if not isinstance(block, dict) or "value" not in block:
+                raise SpinValidationError(
+                    code="terraform_apply_failed",
+                    message=f"terraform output missing {name}.value",
+                    details={
+                        "step": "apply",
+                        "reason": "terraform_output_malformed",
+                        "missing_field": name,
+                    },
+                )
+            raw_list = block["value"]
+            if not isinstance(raw_list, list) or not all(
+                isinstance(x, str) for x in raw_list
+            ):
+                raise SpinValidationError(
+                    code="terraform_apply_failed",
+                    message=f"terraform output {name} is unusable",
+                    details={
+                        "step": "apply",
+                        "reason": "terraform_output_malformed",
+                        "missing_field": name,
+                    },
+                )
+            if len(raw_list) != req.agent_count:
+                raise SpinValidationError(
+                    code="terraform_apply_failed",
+                    message=(
+                        f"terraform output {name} length does not match agent_count"
+                    ),
+                    details={
+                        "step": "apply",
+                        "reason": "terraform_output_malformed",
+                        "missing_field": name,
+                    },
+                )
+            return raw_list
+
+        agent_droplet_ids = _require_output_str_list("agent_droplet_ids")
+        agent_private_ipv4s = _require_output_str_list("agent_private_ipv4s")
+
         ip_block = raw_outputs.get("realm_vpc_ip_range")
         ip_val = None
         if isinstance(ip_block, dict) and "value" in ip_block:
@@ -2693,6 +2836,8 @@ class TerraformAdapter:
             "realm_vpc_id": vpc_id,
             "realm_vpc_ip_range": ip_val,
             "mesh_endpoint": f"tf://{vpc_id}",
+            "agent_droplet_ids": agent_droplet_ids,
+            "agent_private_ipv4s": agent_private_ipv4s,
             "tf_workspace": str(ws),
             "tf_plan_digest": digest,
         }
@@ -2907,6 +3052,127 @@ def _log_job_done(
             "error_code": error_code,
         },
     )
+
+
+_TOPOLOGY_POLL_MAX_S = 90.0
+_TOPOLOGY_POLL_INTERVAL_S = 3.0
+
+
+def _headscale_node_online(node: dict[str, Any]) -> bool | None:
+    raw = node.get("online")
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        norm = raw.strip().lower()
+        if norm in ("true", "1", "yes"):
+            return True
+        if norm in ("false", "0", "no"):
+            return False
+    return None
+
+
+def _agent_patch_from_headscale_node(node: dict[str, Any]) -> dict[str, Any] | None:
+    nid: Any = node.get("id")
+    if nid is None:
+        nid = node.get("name")
+    if nid is None:
+        return None
+    name = node.get("name")
+    if not isinstance(name, str):
+        name = str(nid)
+    online = _headscale_node_online(node)
+    if online is True:
+        status = "healthy"
+        safety_score = 1.0
+    elif online is False:
+        status = "degraded"
+        safety_score = 0.5
+    else:
+        status = "pending"
+        safety_score = 0.5
+    patch: dict[str, Any] = {
+        "id": str(nid),
+        "status": status,
+        "safetyScore": safety_score,
+        "label": name,
+        "source": "headscale",
+    }
+    if online is not None:
+        patch["meshOnline"] = online
+    last_seen = node.get("lastSeen")
+    if isinstance(last_seen, str) and last_seen:
+        patch["lastSeen"] = last_seen
+    return patch
+
+
+async def _emit_topology_from_headscale_poll(job: SpinJob) -> None:
+    """After mesh outputs are ready, poll Headscale for realm-tagged nodes; emit
+    at least one ``topology.delta`` when any node appears (Story 9.2)."""
+    if job.phase != "ready":
+        return
+    if not mesh_bootstrap_lib.mesh_bootstrap_enabled():
+        return
+    if not mesh_bootstrap_lib.headscale_credentials_configured():
+        return
+    mesh = job.outputs.get("mesh")
+    if not isinstance(mesh, dict) or mesh.get("status") != "ready":
+        return
+    api_url = os.environ.get("DIRIJOR_HEADSCALE_API_URL", "").strip().rstrip("/")
+    api_key = os.environ.get("DIRIJOR_HEADSCALE_API_KEY", "").strip()
+    headers = {"Authorization": f"Bearer {api_key}"}
+    deadline = time.monotonic() + _TOPOLOGY_POLL_MAX_S
+    while time.monotonic() < deadline:
+        if job.outputs.get("destroy_requested_at"):
+            return
+        try:
+            async with httpx.AsyncClient(
+                base_url=api_url, headers=headers, timeout=15.0
+            ) as hs_client:
+                nodes = await mesh_bootstrap_lib.list_realm_tagged_nodes(
+                    hs_client, job.realm_id
+                )
+        except mesh_bootstrap_lib.HeadscaleMeshError as exc:
+            logger.info(
+                "mesh.topology.poll_skip",
+                extra={
+                    "event": "mesh.topology.poll_skip",
+                    "realm_id": job.realm_id,
+                    "job_id": job.job_id,
+                    "code": exc.code,
+                },
+            )
+            await asyncio.sleep(_TOPOLOGY_POLL_INTERVAL_S)
+            continue
+        except Exception:
+            logger.exception(
+                "mesh.topology.poll_error",
+                extra={
+                    "event": "mesh.topology.poll_error",
+                    "realm_id": job.realm_id,
+                    "job_id": job.job_id,
+                },
+            )
+            await asyncio.sleep(_TOPOLOGY_POLL_INTERVAL_S)
+            continue
+        if not nodes:
+            await asyncio.sleep(_TOPOLOGY_POLL_INTERVAL_S)
+            continue
+        agents: list[dict[str, Any]] = []
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            patch = _agent_patch_from_headscale_node(n)
+            if patch is not None:
+                agents.append(patch)
+        if not agents:
+            await asyncio.sleep(_TOPOLOGY_POLL_INTERVAL_S)
+            continue
+        await broadcast_event(
+            job.realm_id,
+            "topology.delta",
+            {"agents": agents, "source": "headscale"},
+        )
+        return
 
 
 async def _run_mesh_bootstrap_after_ready(job: SpinJob) -> None:
@@ -3138,6 +3404,18 @@ async def _run_spin_job(
             await emit_realm_metrics_update(job.realm_id, force=True)
             error_source = "mesh-bootstrap"
             await _run_mesh_bootstrap_after_ready(job)
+            try:
+                error_source = "mesh-topology-poll"
+                await _emit_topology_from_headscale_poll(job)
+            except Exception:
+                logger.exception(
+                    "mesh.topology.unexpected",
+                    extra={
+                        "event": "mesh.topology.unexpected",
+                        "realm_id": job.realm_id,
+                        "job_id": job.job_id,
+                    },
+                )
         except asyncio.CancelledError:
             # Cooperative cancellation: re-raise so the event loop can reap
             # the task. The `finally:` block still releases the realm_id so

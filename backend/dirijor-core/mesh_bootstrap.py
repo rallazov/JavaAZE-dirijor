@@ -131,11 +131,11 @@ async def ensure_realm_user(
 
 
 def preauth_ttl_seconds() -> int:
-    raw = os.environ.get("DIRIJOR_MESH_PREAUTH_TTL_SECONDS", "3600").strip()
+    raw = os.environ.get("DIRIJOR_MESH_PREAUTH_TTL_SECONDS", "1800").strip()
     try:
         n = int(raw)
     except ValueError:
-        n = 3600
+        n = 1800
     return max(60, min(n, 86400 * 7))
 
 
@@ -209,6 +209,60 @@ async def issue_preauth_key(
     elif isinstance(exp_out, str) and exp_out:
         exp_str = exp_out
     return str(key), exp_str
+
+
+def _node_tag_values(node: dict[str, Any]) -> set[str]:
+    tags: set[str] = set()
+    for key in (
+        "validTags",
+        "forcedTags",
+        "tags",
+        "aclTags",
+        "advertisedTags",
+        "advertiseTags",
+    ):
+        raw = node.get(key)
+        if isinstance(raw, str):
+            tags.add(raw)
+        elif isinstance(raw, list):
+            tags.update(str(x) for x in raw if x is not None)
+    return tags
+
+
+async def list_realm_tagged_nodes(
+    client: httpx.AsyncClient, realm_id: str
+) -> list[dict[str, Any]]:
+    """Headscale ``GET /api/v1/node`` — filter to active realm-tagged nodes."""
+    r = await client.get("/node")
+    if r.status_code >= 400:
+        raise HeadscaleMeshError(
+            "mesh_headscale_api_error",
+            f"list node failed: HTTP {r.status_code}",
+            http_status=r.status_code,
+        )
+    data = r.json() if r.content else {}
+    if not isinstance(data, dict):
+        return []
+    raw = data.get("nodes")
+    if raw is None:
+        raw = data.get("node")
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    realm_tag = realm_acl_tags(realm_id)[0]
+    for n in raw:
+        if not isinstance(n, dict):
+            continue
+        if realm_tag in _node_tag_values(n):
+            out.append(n)
+    return out
+
+
+async def list_realm_user_nodes(
+    client: httpx.AsyncClient, realm_id: str
+) -> list[dict[str, Any]]:
+    """Compatibility wrapper; Story 9.2 topology is realm-tag based."""
+    return await list_realm_tagged_nodes(client, realm_id)
 
 
 def log_bootstrap_finished(

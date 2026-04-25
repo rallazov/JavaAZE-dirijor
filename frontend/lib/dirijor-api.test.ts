@@ -346,7 +346,7 @@ describe('postMarketplaceImportDraft', () => {
       'fetch',
       vi.fn().mockResolvedValue(
         mockJsonResponse(200, {
-          schema_version: 9,
+          schema_version: 10,
           draft: {
             agent_count: 2,
             realm_description: 'Imported template: t @ 1.0.0',
@@ -357,7 +357,7 @@ describe('postMarketplaceImportDraft', () => {
       )
     );
     const res = await postMarketplaceImportDraft(DEFAULT_API_BASE, '{}');
-    expect(res.schema_version).toBe(9);
+    expect(res.schema_version).toBe(10);
     expect(res.draft.agent_count).toBe(2);
     expect(res.draft.adapter_hint).toBe('local-noop');
   });
@@ -367,7 +367,7 @@ describe('postMarketplaceImportDraft', () => {
       'fetch',
       vi.fn().mockResolvedValue(
         mockJsonResponse(422, {
-          schema_version: 9,
+          schema_version: 10,
           code: 'SCHEMA',
           detail: 'validation failed',
         })
@@ -380,7 +380,19 @@ describe('postMarketplaceImportDraft', () => {
       code: 'SCHEMA',
       httpStatus: 422,
       detail: 'validation failed',
+      schemaVersion: 10,
     });
+  });
+
+  it('throws ImportDraftApiError when the response body is not valid JSON', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockBadJsonResponse(200)));
+
+    const err = await postMarketplaceImportDraft(DEFAULT_API_BASE, '{}').catch(
+      (e) => e
+    );
+    expect(err).toBeInstanceOf(ImportDraftApiError);
+    expect((err as ImportDraftApiError).code).toBe('bad_response');
+    expect((err as ImportDraftApiError).httpStatus).toBe(200);
   });
 
   it('network failures use ImportDraftApiError', async () => {
@@ -390,6 +402,8 @@ describe('postMarketplaceImportDraft', () => {
     );
     expect(err).toBeInstanceOf(ImportDraftApiError);
     expect((err as ImportDraftApiError).code).toBe('network_error');
+    expect((err as ImportDraftApiError).httpStatus).toBe(0);
+    expect((err as ImportDraftApiError).schemaVersion).toBe(0);
   });
 });
 

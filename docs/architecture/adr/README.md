@@ -21,6 +21,14 @@ decision, and the consequences — good and bad.
 | [0001](0001-langgraph-supervisor.md) | LangGraph as the supervisor substrate | Accepted | 2026-04-16 |
 | [0002](0002-consensus-threshold-95.md) | Consensus threshold ≥95% (not 100%, not majority) | Accepted | 2026-04-16 |
 | [0003](0003-terraform-adapter-v0.md) | Terraform adapter v0 (DigitalOcean first) | Accepted | 2026-04-18 |
+| [0004](0004-default-deny-egress-terraform.md) | Default-deny egress via Terraform (Story 2.3) | Accepted | 2026-04-19 |
+| 0005 | AWS private realm adapter (sibling module) | _Reserved — Epic 10, Story 10.5_ | — |
+| 0006 | _(Reserved / unassigned)_ — see `_bmad-output/planning-artifacts/sprint-change-proposal-2026-04-22.md` §2 | _Reserved_ | — |
+| 0007 | Identity, authentication & authorization (OIDC + RBAC) | _Reserved — Epic 11, Story 11.6_ | — |
+| 0008 | Persistence & multi-worker (Postgres + LISTEN/NOTIFY) | _Reserved — Epic 12, Story 12.4_ | — |
+| 0009 | Production runtime on fly.io | _Reserved — Epic 13, Story 13.5_ | — |
+| 0010 | Sandbox runtime & hardened Docker (no Firecracker stub) | _Reserved — Epic 14, Story 14.4_ | — |
+| 0011 | Commercial shell (tenants, Stripe, marketing) | _Reserved — Epic 16, Story 16.5_ | — |
 
 ## Rules of the road
 

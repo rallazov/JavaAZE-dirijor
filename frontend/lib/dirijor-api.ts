@@ -158,6 +158,24 @@ async function readJsonOrThrow(
   }
 }
 
+/** Same as `readJsonOrThrow` but `postMarketplaceImportDraft` is documented to
+ *  surface only `ImportDraftApiError` (plus success), never `SpinApiError`. */
+async function readJsonOrImportDraftThrow(
+  response: Response,
+  httpStatus: number
+): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    throw new ImportDraftApiError(
+      'bad_response',
+      `HTTP ${httpStatus} body was not valid JSON`,
+      httpStatus,
+      0
+    );
+  }
+}
+
 function isSpinResponse(value: unknown): value is SpinResponse {
   if (!value || typeof value !== 'object') return false;
   const v = value as Record<string, unknown>;
@@ -372,7 +390,7 @@ export async function postMarketplaceImportDraft(
   }
 
   const status = response.status;
-  const parsed = await readJsonOrThrow(response, status);
+  const parsed = await readJsonOrImportDraftThrow(response, status);
 
   if (status === 200) {
     if (!isMarketplaceImportDraftSuccess(parsed)) {

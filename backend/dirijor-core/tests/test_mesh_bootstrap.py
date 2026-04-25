@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+import time
 
 import httpx
 import pytest
@@ -250,6 +252,172 @@ def test_mesh_api_failure_in_outputs(monkeypatch):
                     assert m.get("code") == "mesh_headscale_api_error"
                     return
         pytest.fail("mesh did not fail as expected")
+
+
+def test_preauth_ttl_default_1800(monkeypatch):
+    monkeypatch.delenv("DIRIJOR_MESH_PREAUTH_TTL_SECONDS", raising=False)
+    assert mb.preauth_ttl_seconds() == 1800
+
+
+def test_list_realm_tagged_nodes_filters_by_realm_tag():
+    tr = httpx.MockTransport(
+        lambda r: httpx.Response(
+            200,
+            json={
+                "nodes": [
+                    {
+                        "id": "1",
+                        "user": {"name": "r1"},
+                        "validTags": ["tag:dirijor:realm:r1"],
+                    },
+                    {"id": "2", "user": {"name": "r1"}},
+                    {
+                        "id": "3",
+                        "user": {"name": "other"},
+                        "validTags": ["tag:dirijor:realm:other"],
+                    },
+                ]
+            },
+        )
+    )
+
+    async def _run() -> None:
+        async with httpx.AsyncClient(
+            transport=tr, base_url="http://h/api/v1"
+        ) as c:
+            n = await mb.list_realm_tagged_nodes(c, "r1")
+        assert len(n) == 1
+        assert n[0]["id"] == "1"
+
+    asyncio.run(_run())
+
+
+def _hs_handler_topology() -> object:
+    last_realm: list[str] = ["unset"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        u = str(request.url)
+        if request.method == "GET" and path.endswith("/user") and "name=" in u:
+            from urllib.parse import parse_qs, urlparse
+
+            name = parse_qs(urlparse(u).query).get("name", [""])[0]
+            if name:
+                last_realm[0] = name
+            return httpx.Response(200, json={"users": []})
+        if request.method == "POST" and path.rstrip("/").endswith("/user"):
+            body = (
+                json.loads(request.content.decode())
+                if request.content
+                else {}
+            )
+            n = body.get("name", "")
+            if n:
+                last_realm[0] = n
+            return httpx.Response(
+                200, json={"user": {"id": 99, "name": n}}
+            )
+        if request.method == "POST" and "preauthkey" in path:
+            return httpx.Response(
+                200,
+                json={
+                    "preAuthKey": {
+                        "key": "hskey:stub",
+                        "expiration": "2099-01-01T00:00:00Z",
+                    }
+                },
+            )
+        if request.method == "GET" and path.rstrip("/").endswith("node"):
+            r = last_realm[0]
+            return httpx.Response(
+                200,
+                json={
+                    "nodes": [
+                        {
+                            "id": "n-1",
+                            "name": "n1",
+                            "online": True,
+                            "user": {"id": 1, "name": r},
+                            "validTags": [f"tag:dirijor:realm:{r}"],
+                        },
+                        {
+                            "id": "untagged",
+                            "name": "untagged",
+                            "online": True,
+                            "user": {"id": 1, "name": r},
+                        },
+                    ]
+                },
+            )
+        return httpx.Response(500, text=f"unexpected {request.method} {path}")
+
+    return handler
+
+
+def test_headscale_topology_agent_patch_uses_canvas_safe_statuses() -> None:
+    online = supervisor._agent_patch_from_headscale_node(
+        {"id": "n1", "name": "agent-1", "online": True}
+    )
+    offline = supervisor._agent_patch_from_headscale_node(
+        {"id": "n2", "name": "agent-2", "online": False}
+    )
+    unknown = supervisor._agent_patch_from_headscale_node(
+        {"id": "n3", "name": "agent-3"}
+    )
+
+    assert online is not None
+    assert online["status"] == "healthy"
+    assert online["safetyScore"] == 1.0
+    assert online["meshOnline"] is True
+    assert offline is not None
+    assert offline["status"] == "degraded"
+    assert offline["safetyScore"] == 0.5
+    assert offline["meshOnline"] is False
+    assert unknown is not None
+    assert unknown["status"] == "pending"
+    assert unknown["safetyScore"] == 0.5
+
+
+def test_topology_delta_from_headscale_node_poll(monkeypatch):
+    """Story 9.2: mocked /node yields one topology.delta for matching realm user."""
+    monkeypatch.setenv("DIRIJOR_MESH_BOOTSTRAP_ENABLED", "1")
+    monkeypatch.setenv("DIRIJOR_HEADSCALE_API_URL", "http://hs.test/api/v1")
+    monkeypatch.setenv("DIRIJOR_HEADSCALE_API_KEY", "secret")
+    monkeypatch.setenv("DIRIJOR_HEADSCALE_PUBLIC_URL", "https://hs.example.com")
+    monkeypatch.setattr(supervisor, "PROVISION_DELAY_S", 0.01)
+    tr = httpx.MockTransport(_hs_handler_topology())
+    _patch_httpx_client(monkeypatch, tr)
+
+    seen: list[tuple[str, dict]] = []
+    got_topology = threading.Event()
+
+    async def _cap(realm_id: str, event_type: str, payload: dict):
+        seen.append((event_type, payload))
+        if event_type == "topology.delta":
+            got_topology.set()
+        return 0
+
+    monkeypatch.setattr(supervisor, "broadcast_event", _cap)
+
+    with TestClient(supervisor.app) as client:
+        client.post(
+            "/realms/spin",
+            json={"realm_description": "m", "adapter_hint": "local-noop"},
+        )
+        assert got_topology.wait(
+            timeout=5
+        ), "topology.delta not broadcast within window"
+    topo = [p for et, p in seen if et == "topology.delta"]
+    assert any(len(p.get("agents", [])) > 0 for p in topo)
+    assert any(p.get("source") == "headscale" for p in topo)
+    agent_ids = {a["id"] for p in topo for a in p.get("agents", [])}
+    assert "n-1" in agent_ids
+    assert "untagged" not in agent_ids
+    assert any(
+        a.get("status") == "healthy" and a.get("meshOnline") is True
+        for p in topo
+        for a in p.get("agents", [])
+    )
 
 
 def test_preauth_key_one_shot(monkeypatch):

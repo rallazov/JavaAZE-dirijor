@@ -104,7 +104,7 @@ You should see a response whose shape matches this (values will differ):
 {
   "service": "dirijor-supervisor",
   "version": "0.1.0",
-  "schema_version": 9,
+  "schema_version": 10,
   "status": "operational",
   "consensus_engine": "ready",
   "uptime_s": 4.8,
@@ -120,7 +120,7 @@ You should see a response whose shape matches this (values will differ):
   "realtime": {
     "connections": 0,
     "heartbeat_interval_s": 15.0,
-    "schema_version": 9
+    "schema_version": 10
   }
 }
 ```
