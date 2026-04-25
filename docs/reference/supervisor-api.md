@@ -634,7 +634,7 @@ additive change and requires updating this page in the same PR.
 | `terraform_apply_failed`     | _on job surface_ | `terraform apply` non-zero or malformed `terraform output -json` after apply; may include `details.partial_apply`. `details.reason` is `terraform_output_malformed` (bad JSON / missing `realm_vpc_id` / missing or unusable `agent_droplet_ids` / `agent_private_ipv4s` — see `details.missing_field`) or `terraform_output_failed` (non-zero `terraform output` exit after successful apply). |
 | `terraform_destroy_failed`   | _on job surface_ / nested in `outputs.destroy_error` | `terraform destroy` non-zero on the DELETE path. |
 | `terraform_command_timeout`  | _on job surface_ | Subprocess exceeded `DIRIJOR_TERRAFORM_CMD_TIMEOUT_S`. |
-| `adapter_credentials_missing`| _on job surface_ | `DIGITALOCEAN_TOKEN` or **`DIRIJOR_DO_SSH_PUBLIC_KEY`** missing / empty at `terraform-digitalocean` `validate` time (`SpinError.message` names which). |
+| `adapter_credentials_missing`| _on job surface_ | `terraform-digitalocean` `validate`: `DIGITALOCEAN_TOKEN`, **`DIRIJOR_DO_SSH_PUBLIC_KEY`**, and **Story 9.2** mesh + Headscale + wrapper inputs — **`DIRIJOR_MESH_BOOTSTRAP_ENABLED`**, **`DIRIJOR_HEADSCALE_API_URL`**, **`DIRIJOR_HEADSCALE_API_KEY`**, a resolvable `control_plane_base_url` (via **`DIRIJOR_HEADSCALE_PUBLIC_URL`** and/or the API URL), and **`DIRIJOR_AGENT_WRAPPER_IMAGE`** — must be set; `SpinError.message` names the first failure (existing ordering: token, then SSH, then 9.2 gates). |
 | `egress_policy_denied`       | _on job surface_ | Pre-provision egress policy hook denied the spin (`validate` / `provision` only — not `destroy`). `details.reason` (e.g. `policy_hook`), `details.policy_id` (e.g. `egress-default-v0`), `details.adapter`. **`DIRIJOR_EGRESS_POLICY_DENY`** is recognized only when the value trims to exactly **`1`** (unlike **`DIRIJOR_ALLOW_PUBLIC_EGRESS`**, which treats `1` / `true` / `yes` / `on` as truthy). |
 | `destroy_invalid_state`      | `409` | `DELETE` when `phase != "ready"`. `details.current_phase`. |
 | `destroy_already_requested`  | `409` | Second `DELETE` while destroy is in flight. `details.destroy_requested_at`. |
@@ -668,8 +668,20 @@ plan → apply` in a per-realm workspace under **`DIRIJOR_TERRAFORM_WORKSPACE_RO
 (default: `<temp>/dirijor/terraform-workspaces/<realm_id>/`). **Story 9.1**
 also requires **`DIRIJOR_DO_SSH_PUBLIC_KEY`** (operator OpenSSH public key) at
 `validate` / `provision`; it is written to `terraform.tfvars.json` as
-`ssh_public_key` (**not** via `TF_VAR_*`). The adapter is wrapped by
-**`EgressPolicyRealmAdapter`** (Story 2.3) so a composable policy hook runs
+`ssh_public_key` (**not** via `TF_VAR_*`). **Story 9.2** requires the mesh
+feature gate, Headscale API URL + key, a non-empty operator join base URL
+(`control_plane_base_url` — usually **`DIRIJOR_HEADSCALE_PUBLIC_URL`**), and
+**`DIRIJOR_AGENT_WRAPPER_IMAGE`**. Before any Terraform step, Core mints
+**`agent_count`** one-shot Headscale preauth keys and writes
+`headscale_login_url`, `wrapper_image`, and `agent_preauth_keys` to
+`terraform.tfvars.json` (keys are **not** in `GET /realms/{job_id}`). TTL is
+driven by **`DIRIJOR_MESH_PREAUTH_TTL_SECONDS`** (default **1800** seconds
+after 9.2; min **60**, max **7d**). After `phase == ready` and successful mesh
+`outputs.mesh`, the supervisor may poll Headscale (up to **90s**) and emit
+**`topology.delta`** when nodes carrying `tag:dirijor:realm:<realm_id>` appear.
+Headscale online state is mapped to canvas-safe status hints (`healthy`,
+`degraded`, or `pending`) rather than treated as a Safety Fortress verdict.
+The adapter is wrapped by **`EgressPolicyRealmAdapter`** (Story 2.3) so a composable policy hook runs
 before `validate` / `provision`. Ready `outputs` include `realm_vpc_id`,
 `realm_vpc_ip_range`, `mesh_endpoint` (`tf://<vpc_id>` **placeholder preserved**
 for backward compatibility; Story 5.1 adds `headscale_control_url` + `mesh`
@@ -814,7 +826,15 @@ response — `GET /realms/{job_id}` never echoes it (avoids log leakage on poll)
 **Environment (server-side only):** `DIRIJOR_HEADSCALE_API_URL` (must include
 `/api/v1` path prefix), `DIRIJOR_HEADSCALE_API_KEY` (Bearer token). Optional
 `DIRIJOR_HEADSCALE_PUBLIC_URL` — HTTPS origin shown to operators as
-`outputs.headscale_control_url` (defaults to API URL with `/api/v1` stripped).
+`outputs.headscale_control_url` and used as the Tailscale/Headscale
+**`--login-server`** base for `terraform-digitalocean` (defaults to API URL
+with `/api/v1` stripped). Optional **`DIRIJOR_MESH_PREAUTH_TTL_SECONDS`**
+(clamped; default **1800** seconds for preauth key expiration after Story 9.2).
+Optional **`DIRIJOR_AGENT_WRAPPER_IMAGE`** is required for real DO droplet spins
+(Story 9.2) but not for `local-noop`. The image must be pullable by first-boot
+cloud-init without an interactive registry login; private registries require
+pre-baked credentials, a reachable mirror, or future explicit registry-secret
+plumbing.
 
 | Code | When |
 |---|---|

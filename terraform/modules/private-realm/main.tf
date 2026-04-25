@@ -106,7 +106,15 @@ resource "digitalocean_droplet" "agent" {
   backups    = false
   monitoring = false
   ipv6       = false
-  user_data  = ""
+  user_data = templatefile(
+    "${path.module}/cloud-init/agent.yaml.tftpl",
+    {
+      preauth_key         = var.agent_preauth_keys[count.index]
+      headscale_login_url = var.headscale_login_url
+      wrapper_image       = var.wrapper_image
+      realm_id            = var.realm_name
+    }
+  )
 
   depends_on = [
     digitalocean_vpc.realm_vpc,

@@ -60,7 +60,24 @@ def test_private_realm_story_9_1_droplet_and_ssh_key_resources() -> None:
     assert droplet_chunk.count("tags =") == 1
     assert tag_lit in droplet_chunk
     assert '"0.0.0.0/0"' not in droplet_chunk
-    assert 'user_data  = ""' in main_tf
+    assert "templatefile(" in main_tf
+    assert "cloud-init/agent.yaml.tftpl" in main_tf
+    assert "var.agent_preauth_keys[count.index]" in main_tf
+
+
+def test_private_realm_story_9_2_mesh_variables() -> None:
+    vtf = _read(
+        _repo_root() / "terraform" / "modules" / "private-realm" / "variables.tf"
+    )
+    for name in (
+        "headscale_login_url",
+        "wrapper_image",
+        "agent_preauth_keys",
+    ):
+        assert f'variable "{name}"' in vtf
+    block = vtf.split('variable "agent_preauth_keys"', 1)[1]
+    assert "sensitive" in block[:500]
+    assert "length(var.agent_preauth_keys) == var.agent_count" in vtf
 
 
 def test_private_realm_story_9_1_outputs_splat() -> None:

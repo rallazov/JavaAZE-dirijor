@@ -1,0 +1,33 @@
+#cloud-config
+# Story 9.2 — OpenClaw wrapper + Headscale (tailscale) join. Do not enable shell xtrace
+# (would leak the authkey). Preauth is written root-only; do not log the key to stdout.
+package_update: true
+package_upgrade: false
+packages:
+  - ca-certificates
+  - curl
+  - docker.io
+write_files:
+  - path: /root/dirijor-preauth
+    owner: root:root
+    permissions: "0600"
+    content: |
+      ${preauth_key}
+runcmd:
+  - [systemctl, enable, --now, docker]
+  - |
+      set -euo pipefail
+      curl -fsSL https://tailscale.com/install.sh | sh
+  - |
+      set -euo pipefail
+      TS_AUTH="$(tr -d '\n' < /root/dirijor-preauth || true)"
+      tailscale up \
+        --login-server="${headscale_login_url}" \
+        --authkey="$TS_AUTH" \
+        --advertise-tags=tag:dirijor:realm:${realm_id} \
+        --accept-routes=false
+      rm -f /root/dirijor-preauth
+  - |
+      set -euo pipefail
+      docker pull ${wrapper_image}
+      docker run -d --name dirijor-openclaw-wrapper --restart=unless-stopped --net=host ${wrapper_image}

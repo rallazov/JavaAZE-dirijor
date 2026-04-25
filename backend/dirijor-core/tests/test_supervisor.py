@@ -22,11 +22,15 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 import supervisor
+
+
+_REAL_HTTpx_ASYNC = httpx.AsyncClient
 
 
 client = TestClient(supervisor.app)
@@ -1227,10 +1231,57 @@ _TF_TEST_SSH_PUB = (
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDEtestkeydev9oneonlyplaceholder"
 )
 
+_TERRAFORM_PRIVATE_REALM_MODULE = (
+    Path(__file__).resolve().parents[3] / "terraform" / "modules" / "private-realm"
+)
+
+
+def _patch_terraform_preauth_httpx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Headscale: ensure user + N one-shot preauth keys (+ empty /node for poll)."""
+    n = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal n
+        path = request.url.path
+        if request.method == "GET" and path.endswith("/user"):
+            return httpx.Response(200, json={"users": []})
+        if request.method == "POST" and path.rstrip("/").endswith("/user"):
+            body = json.loads(request.content.decode() or "{}")
+            name = body.get("name", "")
+            return httpx.Response(
+                200, json={"user": {"id": 42, "name": name}}
+            )
+        if request.method == "POST" and "preauthkey" in path:
+            n += 1
+            return httpx.Response(
+                200,
+                json={"preAuthKey": {"key": f"hskey:preauth:{n}"}},
+            )
+        if request.method == "GET" and path.rstrip("/").endswith("node"):
+            return httpx.Response(200, json={"nodes": []})
+        return httpx.Response(500, text=f"unexpected {request.method} {path}")
+
+    tr = httpx.MockTransport(handler)
+
+    def _factory(**kwargs: object) -> httpx.AsyncClient:
+        return _REAL_HTTpx_ASYNC(**{**kwargs, "transport": tr})
+
+    monkeypatch.setattr(supervisor.httpx, "AsyncClient", _factory)
+
 
 def _patch_terraform_do_spin_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DIGITALOCEAN_TOKEN", "do_pat_" + "0" * 64)
     monkeypatch.setenv("DIRIJOR_DO_SSH_PUBLIC_KEY", _TF_TEST_SSH_PUB)
+    monkeypatch.setenv("DIRIJOR_MESH_BOOTSTRAP_ENABLED", "1")
+    monkeypatch.setenv(
+        "DIRIJOR_HEADSCALE_API_URL", "http://headscale.test/api/v1"
+    )
+    monkeypatch.setenv("DIRIJOR_HEADSCALE_API_KEY", "k")
+    monkeypatch.setenv("DIRIJOR_HEADSCALE_PUBLIC_URL", "https://headscale.test")
+    monkeypatch.setenv(
+        "DIRIJOR_AGENT_WRAPPER_IMAGE", "ghcr.io/example/wrapper:unit"
+    )
+    _patch_terraform_preauth_httpx(monkeypatch)
 
 
 def _tf_output_stdout() -> str:
@@ -1320,10 +1371,8 @@ def test_spin_terraform_adapter_accepts_and_returns_202(monkeypatch, tmp_path):
         workspace_root=tmp_path,
         subprocess_runner=stub,
         env_provider=_tf_env_provider,
-        module_source=tmp_path / "mod",
+        module_source=_TERRAFORM_PRIVATE_REALM_MODULE,
     )
-    (tmp_path / "mod").mkdir()
-    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
     monkeypatch.setattr(
         supervisor,
         "_ADAPTERS",
@@ -1354,10 +1403,8 @@ def test_spin_terraform_lifecycle_progresses_to_ready(monkeypatch, tmp_path):
         workspace_root=tmp_path,
         subprocess_runner=stub,
         env_provider=_tf_env_provider,
-        module_source=tmp_path / "mod",
+        module_source=_TERRAFORM_PRIVATE_REALM_MODULE,
     )
-    (tmp_path / "mod").mkdir()
-    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
     monkeypatch.setattr(
         supervisor,
         "_ADAPTERS",
@@ -1405,10 +1452,8 @@ def test_spin_terraform_invokes_commands_in_order(monkeypatch, tmp_path):
         workspace_root=tmp_path,
         subprocess_runner=stub,
         env_provider=_tf_env_provider,
-        module_source=tmp_path / "mod",
+        module_source=_TERRAFORM_PRIVATE_REALM_MODULE,
     )
-    (tmp_path / "mod").mkdir()
-    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
     monkeypatch.setattr(
         supervisor,
         "_ADAPTERS",
@@ -1457,10 +1502,8 @@ def test_spin_terraform_init_failure_surfaces_terraform_init_failed(
         workspace_root=tmp_path,
         subprocess_runner=stub,
         env_provider=_tf_env_provider,
-        module_source=tmp_path / "mod",
+        module_source=_TERRAFORM_PRIVATE_REALM_MODULE,
     )
-    (tmp_path / "mod").mkdir()
-    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
     monkeypatch.setattr(
         supervisor,
         "_ADAPTERS",
@@ -1502,10 +1545,8 @@ def test_spin_terraform_validate_failure_surfaces_terraform_validate_failed(
         workspace_root=tmp_path,
         subprocess_runner=stub,
         env_provider=_tf_env_provider,
-        module_source=tmp_path / "mod",
+        module_source=_TERRAFORM_PRIVATE_REALM_MODULE,
     )
-    (tmp_path / "mod").mkdir()
-    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
     monkeypatch.setattr(
         supervisor,
         "_ADAPTERS",
@@ -1545,10 +1586,8 @@ def test_spin_terraform_plan_failure_surfaces_terraform_plan_failed(
         workspace_root=tmp_path,
         subprocess_runner=stub,
         env_provider=_tf_env_provider,
-        module_source=tmp_path / "mod",
+        module_source=_TERRAFORM_PRIVATE_REALM_MODULE,
     )
-    (tmp_path / "mod").mkdir()
-    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
     monkeypatch.setattr(
         supervisor,
         "_ADAPTERS",
@@ -1588,10 +1627,8 @@ def test_spin_terraform_apply_failure_surfaces_terraform_apply_failed(
         workspace_root=tmp_path,
         subprocess_runner=stub,
         env_provider=_tf_env_provider,
-        module_source=tmp_path / "mod",
+        module_source=_TERRAFORM_PRIVATE_REALM_MODULE,
     )
-    (tmp_path / "mod").mkdir()
-    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
     monkeypatch.setattr(
         supervisor,
         "_ADAPTERS",
@@ -1633,10 +1670,8 @@ def test_spin_terraform_apply_failure_scrubs_do_pat_tokens(monkeypatch, tmp_path
         workspace_root=tmp_path,
         subprocess_runner=stub,
         env_provider=_tf_env_provider,
-        module_source=tmp_path / "mod",
+        module_source=_TERRAFORM_PRIVATE_REALM_MODULE,
     )
-    (tmp_path / "mod").mkdir()
-    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
     monkeypatch.setattr(
         supervisor,
         "_ADAPTERS",
@@ -1677,10 +1712,8 @@ def test_spin_terraform_command_timeout_surfaces_terraform_command_timeout(
         workspace_root=tmp_path,
         subprocess_runner=stub,
         env_provider=_tf_env_provider,
-        module_source=tmp_path / "mod",
+        module_source=_TERRAFORM_PRIVATE_REALM_MODULE,
     )
-    (tmp_path / "mod").mkdir()
-    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
     monkeypatch.setattr(
         supervisor,
         "_ADAPTERS",
@@ -1719,10 +1752,8 @@ def test_spin_terraform_credentials_missing_at_validate_time_surfaces_adapter_cr
         workspace_root=tmp_path,
         subprocess_runner=stub,
         env_provider=supervisor._default_env_provider,
-        module_source=tmp_path / "mod",
+        module_source=_TERRAFORM_PRIVATE_REALM_MODULE,
     )
-    (tmp_path / "mod").mkdir()
-    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
     monkeypatch.setattr(
         supervisor,
         "_ADAPTERS",
@@ -1764,10 +1795,8 @@ def test_spin_terraform_credentials_ssh_missing_at_validate_surfaces_adapter_cre
         workspace_root=tmp_path,
         subprocess_runner=stub,
         env_provider=supervisor._default_env_provider,
-        module_source=tmp_path / "mod",
+        module_source=_TERRAFORM_PRIVATE_REALM_MODULE,
     )
-    (tmp_path / "mod").mkdir()
-    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
     monkeypatch.setattr(
         supervisor,
         "_ADAPTERS",
@@ -1806,10 +1835,8 @@ def test_destroy_on_ready_job_returns_202_and_runs_terraform_destroy(
         workspace_root=tmp_path,
         subprocess_runner=stub,
         env_provider=_tf_env_provider,
-        module_source=tmp_path / "mod",
+        module_source=_TERRAFORM_PRIVATE_REALM_MODULE,
     )
-    (tmp_path / "mod").mkdir()
-    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
     monkeypatch.setattr(
         supervisor,
         "_ADAPTERS",
@@ -1960,10 +1987,8 @@ def test_destroy_failure_surfaces_terraform_destroy_failed_in_outputs(
         workspace_root=tmp_path,
         subprocess_runner=stub,
         env_provider=_tf_env_provider,
-        module_source=tmp_path / "mod",
+        module_source=_TERRAFORM_PRIVATE_REALM_MODULE,
     )
-    (tmp_path / "mod").mkdir()
-    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
     monkeypatch.setattr(
         supervisor,
         "_ADAPTERS",
@@ -2009,10 +2034,8 @@ def test_spin_terraform_malformed_output_json_surfaces_terraform_apply_failed(
         workspace_root=tmp_path,
         subprocess_runner=stub,
         env_provider=_tf_env_provider,
-        module_source=tmp_path / "mod",
+        module_source=_TERRAFORM_PRIVATE_REALM_MODULE,
     )
-    (tmp_path / "mod").mkdir()
-    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
     monkeypatch.setattr(
         supervisor,
         "_ADAPTERS",
@@ -2053,10 +2076,8 @@ def test_spin_terraform_output_step_nonzero_surfaces_terraform_apply_failed(
         workspace_root=tmp_path,
         subprocess_runner=stub,
         env_provider=_tf_env_provider,
-        module_source=tmp_path / "mod",
+        module_source=_TERRAFORM_PRIVATE_REALM_MODULE,
     )
-    (tmp_path / "mod").mkdir()
-    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
     monkeypatch.setattr(
         supervisor,
         "_ADAPTERS",
@@ -2095,52 +2116,72 @@ def test_terraform_write_tfvars_allow_public_egress_default_false(
 ):
     monkeypatch.delenv("DIRIJOR_ALLOW_PUBLIC_EGRESS", raising=False)
     monkeypatch.setenv("DIRIJOR_DO_SSH_PUBLIC_KEY", _TF_TEST_SSH_PUB)
+    monkeypatch.setenv("DIRIJOR_HEADSCALE_PUBLIC_URL", "https://headscale.test")
+    monkeypatch.setenv("DIRIJOR_HEADSCALE_API_URL", "http://headscale.test/api/v1")
+    monkeypatch.setenv("DIRIJOR_HEADSCALE_API_KEY", "k")
+    monkeypatch.setenv("DIRIJOR_MESH_BOOTSTRAP_ENABLED", "1")
+    monkeypatch.setenv(
+        "DIRIJOR_AGENT_WRAPPER_IMAGE", "ghcr.io/example/wrapper:unit"
+    )
     stub = _StubTerraformRunner()
     tf = supervisor.TerraformAdapter(
         workspace_root=tmp_path,
         subprocess_runner=stub,
         env_provider=_tf_env_provider,
-        module_source=tmp_path / "mod",
+        module_source=_TERRAFORM_PRIVATE_REALM_MODULE,
     )
-    (tmp_path / "mod").mkdir()
-    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
     ws = tmp_path / "ws"
     ws.mkdir()
     req = supervisor.SpinRequest(realm_description="d", agent_count=2)
-    tf._write_tfvars(ws, req, "realm-abc")
+    tf._write_tfvars(
+        ws, req, "realm-abc", agent_preauth_keys=["k0", "k1"]
+    )
     data = json.loads((ws / "terraform.tfvars.json").read_text())
     assert data == {
         "agent_count": 2,
+        "agent_preauth_keys": ["k0", "k1"],
         "allow_public_egress": False,
         "cloud_provider": "digitalocean",
+        "headscale_login_url": "https://headscale.test",
         "realm_name": "realm-abc",
         "ssh_public_key": _TF_TEST_SSH_PUB,
+        "wrapper_image": "ghcr.io/example/wrapper:unit",
     }
 
 
 def test_terraform_write_tfvars_allow_public_egress_from_env(monkeypatch, tmp_path):
     monkeypatch.setenv("DIRIJOR_ALLOW_PUBLIC_EGRESS", "1")
     monkeypatch.setenv("DIRIJOR_DO_SSH_PUBLIC_KEY", _TF_TEST_SSH_PUB)
+    monkeypatch.setenv("DIRIJOR_HEADSCALE_PUBLIC_URL", "https://headscale.test")
+    monkeypatch.setenv("DIRIJOR_HEADSCALE_API_URL", "http://headscale.test/api/v1")
+    monkeypatch.setenv("DIRIJOR_HEADSCALE_API_KEY", "k")
+    monkeypatch.setenv("DIRIJOR_MESH_BOOTSTRAP_ENABLED", "1")
+    monkeypatch.setenv(
+        "DIRIJOR_AGENT_WRAPPER_IMAGE", "ghcr.io/example/wrapper:unit"
+    )
     stub = _StubTerraformRunner()
     tf = supervisor.TerraformAdapter(
         workspace_root=tmp_path,
         subprocess_runner=stub,
         env_provider=_tf_env_provider,
-        module_source=tmp_path / "mod",
+        module_source=_TERRAFORM_PRIVATE_REALM_MODULE,
     )
-    (tmp_path / "mod").mkdir()
-    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
     ws = tmp_path / "ws2"
     ws.mkdir()
     req = supervisor.SpinRequest(realm_description="d", agent_count=2)
-    tf._write_tfvars(ws, req, "realm-xyz")
+    tf._write_tfvars(
+        ws, req, "realm-xyz", agent_preauth_keys=["k0", "k1"]
+    )
     data = json.loads((ws / "terraform.tfvars.json").read_text())
     assert data == {
         "agent_count": 2,
+        "agent_preauth_keys": ["k0", "k1"],
         "allow_public_egress": True,
         "cloud_provider": "digitalocean",
+        "headscale_login_url": "https://headscale.test",
         "realm_name": "realm-xyz",
         "ssh_public_key": _TF_TEST_SSH_PUB,
+        "wrapper_image": "ghcr.io/example/wrapper:unit",
     }
 
 
@@ -2161,10 +2202,8 @@ def test_spin_egress_policy_denied_when_env_set(monkeypatch, tmp_path):
         workspace_root=tmp_path,
         subprocess_runner=stub,
         env_provider=_tf_env_provider,
-        module_source=tmp_path / "mod",
+        module_source=_TERRAFORM_PRIVATE_REALM_MODULE,
     )
-    (tmp_path / "mod").mkdir()
-    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
     wrapped = supervisor._wrap_realm_adapter_with_egress_policy(inner)
     monkeypatch.setattr(
         supervisor,
@@ -2225,7 +2264,7 @@ def test_terraform_adapter_invalid_cmd_timeout_env_falls_back(monkeypatch, tmp_p
         workspace_root=tmp_path,
         subprocess_runner=stub,
         env_provider=_tf_env_provider,
-        module_source=tmp_path / "mod",
+        module_source=_TERRAFORM_PRIVATE_REALM_MODULE,
         cmd_timeout_s=42.5,
     )
     assert tf._cmd_timeout_s == 42.5
@@ -2238,10 +2277,8 @@ def test_terraform_destroy_rejects_workspace_outside_root(monkeypatch, tmp_path)
         workspace_root=tmp_path / "wr",
         subprocess_runner=stub,
         env_provider=_tf_env_provider,
-        module_source=tmp_path / "mod",
+        module_source=_TERRAFORM_PRIVATE_REALM_MODULE,
     )
-    (tmp_path / "mod").mkdir()
-    (tmp_path / "mod" / "main.tf").write_text("# stub\n", encoding="utf-8")
     outside = tmp_path / "escape_ws"
     outside.mkdir()
     job = supervisor.SpinJob(
