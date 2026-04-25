@@ -1,0 +1,112 @@
+#cloud-config
+# Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
+
+package_update: true
+package_upgrade: false
+packages:
+  - ca-certificates
+  - curl
+  - docker.io
+  - docker-compose-plugin
+
+write_files:
+  - path: /opt/dirijor/headscale/config.yaml
+    owner: root:root
+    permissions: "0644"
+    content: |
+      server_url: https://${headscale_fqdn}
+      listen_addr: 0.0.0.0:8080
+      metrics_listen_addr: 127.0.0.1:9090
+      grpc_listen_addr: 127.0.0.1:50443
+      noise:
+        private_key_path: /var/lib/headscale/noise_private.key
+      prefixes:
+        v4: 100.64.0.0/10
+        v6: fd7a:115c:a1e0::/48
+      derp:
+        server:
+          enabled: false
+        urls:
+          - https://controlplane.tailscale.com/derpmap/default
+        auto_update_enabled: true
+        update_frequency: 24h
+      database:
+        type: sqlite
+        sqlite:
+          path: /var/lib/headscale/db.sqlite
+      policy:
+        mode: file
+        path: /etc/headscale/acl.hujson
+      dns:
+        magic_dns: true
+        base_domain: dirijor.internal
+      log:
+        level: info
+  - path: /opt/dirijor/headscale/acl.hujson
+    owner: root:root
+    permissions: "0644"
+    content: |
+      {
+        "groups": {},
+        "tagOwners": {
+          "tag:dirijor": [],
+          "tag:dirijor:realm": []
+        },
+        "acls": [
+          { "action": "accept", "src": ["*"], "dst": ["*:*"] }
+        ]
+      }
+  - path: /opt/dirijor/headscale/Caddyfile
+    owner: root:root
+    permissions: "0644"
+    content: |
+%{ if lets_encrypt_email != "" || lets_encrypt_staging ~}
+      {
+%{ if lets_encrypt_email != "" ~}
+        email ${lets_encrypt_email}
+%{ endif ~}
+%{ if lets_encrypt_staging ~}
+        acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+%{ endif ~}
+      }
+%{ endif ~}
+      https://${headscale_fqdn} {
+        encode zstd gzip
+        reverse_proxy headscale:8080
+      }
+  - path: /opt/dirijor/headscale/docker-compose.yml
+    owner: root:root
+    permissions: "0644"
+    content: |
+      services:
+        headscale:
+          image: ${headscale_image}
+          command: ["serve"]
+          restart: unless-stopped
+          volumes:
+            - /opt/dirijor/headscale/config.yaml:/etc/headscale/config.yaml:ro
+            - /opt/dirijor/headscale/acl.hujson:/etc/headscale/acl.hujson:ro
+            - /var/lib/dirijor/headscale:/var/lib/headscale
+          networks:
+            - headscale-control
+        caddy:
+          image: ${caddy_image}
+          restart: unless-stopped
+          ports:
+            - "80:80"
+            - "443:443"
+          volumes:
+            - /opt/dirijor/headscale/Caddyfile:/etc/caddy/Caddyfile:ro
+            - /var/lib/dirijor/caddy/data:/data
+            - /var/lib/dirijor/caddy/config:/config
+          depends_on:
+            - headscale
+          networks:
+            - headscale-control
+      networks:
+        headscale-control:
+
+runcmd:
+  - mkdir -p /var/lib/dirijor/headscale /var/lib/dirijor/caddy/data /var/lib/dirijor/caddy/config
+  - systemctl enable --now docker
+  - docker compose -f /opt/dirijor/headscale/docker-compose.yml up -d

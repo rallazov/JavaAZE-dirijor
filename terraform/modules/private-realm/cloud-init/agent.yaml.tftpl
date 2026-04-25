@@ -20,6 +20,7 @@ runcmd:
       curl -fsSL https://tailscale.com/install.sh | sh
   - |
       set -euo pipefail
+      trap 'rm -f /root/dirijor-preauth' EXIT
       TS_AUTH="$(tr -d '\n' < /root/dirijor-preauth || true)"
       tailscale up \
         --login-server="${headscale_login_url}" \
@@ -27,7 +28,8 @@ runcmd:
         --advertise-tags=tag:dirijor:realm:${realm_id} \
         --accept-routes=false
       rm -f /root/dirijor-preauth
+      trap - EXIT
   - |
       set -euo pipefail
-      docker pull ${wrapper_image}
-      docker run -d --name dirijor-openclaw-wrapper --restart=unless-stopped --net=host ${wrapper_image}
+      docker pull "${wrapper_image}"
+      docker run -d --name dirijor-openclaw-wrapper --restart=unless-stopped --net=host "${wrapper_image}"

@@ -5,7 +5,7 @@ Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
 # Tutorial — Your first local Dirijor environment
 
 > **Last verified:** 2026-04-22, against `docs/reference/supervisor-api.md` and
-> live `GET /` / `GET /health` (`SCHEMA_VERSION` **9** after Story 7.2; see
+> live `GET /` / `GET /health` (`SCHEMA_VERSION` **10** after Story 9.1; see
 > `backend/dirijor-core/supervisor.py::SCHEMA_VERSION`). Re-run the curl +
 > pytest steps after any `SCHEMA_VERSION` bump. Numeric fields (`uptime_s`,
 > `timestamp`, `connections`) will differ; shapes should match the reference.

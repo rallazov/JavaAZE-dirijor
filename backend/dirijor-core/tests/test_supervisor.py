@@ -39,6 +39,31 @@ client = TestClient(supervisor.app)
 # --- AC 1 (Story 3.1) --------------------------------------------------------
 
 
+def test_cors_comma_only_env_falls_back_to_dev_defaults(monkeypatch):
+    monkeypatch.setenv("DIRIJOR_CORS_ORIGINS", ", ,")
+
+    assert supervisor._cors_allow_origins() == [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
+    ]
+    assert supervisor._cors_allow_origin_regex() is not None
+
+
+def test_cors_explicit_origins_disable_dev_regex(monkeypatch):
+    monkeypatch.setenv(
+        "DIRIJOR_CORS_ORIGINS",
+        "https://canvas.example.com, https://ops.example.com",
+    )
+
+    assert supervisor._cors_allow_origins() == [
+        "https://canvas.example.com",
+        "https://ops.example.com",
+    ]
+    assert supervisor._cors_allow_origin_regex() is None
+
+
 def test_root_shape():
     response = client.get("/")
     assert response.status_code == 200
@@ -2106,6 +2131,44 @@ def test_spin_terraform_output_step_nonzero_surfaces_terraform_apply_failed(
     assert final["phase"] == "failed"
     assert final["error"]["code"] == "terraform_apply_failed"
     assert final["error"]["details"].get("reason") == "terraform_output_failed"
+
+
+def test_terraform_output_empty_string_list_entry_is_malformed(
+    monkeypatch, tmp_path
+):
+    _patch_terraform_do_spin_env(monkeypatch)
+    raw = json.loads(_tf_output_stdout())
+    raw["agent_droplet_ids"]["value"] = [""]
+    raw["agent_private_ipv4s"]["value"] = ["10.10.0.2"]
+    stub = _StubTerraformRunner()
+    stub.queue["output"] = supervisor.CompletedRun(0, json.dumps(raw), "", 0.01)
+    tf = supervisor.TerraformAdapter(
+        workspace_root=tmp_path,
+        subprocess_runner=stub,
+        env_provider=_tf_env_provider,
+        module_source=_TERRAFORM_PRIVATE_REALM_MODULE,
+    )
+    job = supervisor.SpinJob(
+        job_id="job-empty-output",
+        realm_id="realm-empty-output",
+        phase="provisioning",
+        adapter=tf.name,
+        created_at=supervisor._iso_now(),
+        status_url="/realms/job-empty-output",
+        updated_at=supervisor._iso_now(),
+        realm_description="empty output",
+        agent_count=1,
+        outputs={},
+        error=None,
+        schema_version=supervisor.SCHEMA_VERSION,
+    )
+    req = supervisor.SpinRequest(realm_description="empty output", agent_count=1)
+
+    with pytest.raises(supervisor.SpinValidationError) as ei:
+        asyncio.run(tf.provision(req, job))
+    assert ei.value.code == "terraform_apply_failed"
+    assert ei.value.details.get("reason") == "terraform_output_malformed"
+    assert ei.value.details.get("missing_field") == "agent_droplet_ids"
 
 
 # --- Story 2.3 (default-deny egress) ------------------------------------------

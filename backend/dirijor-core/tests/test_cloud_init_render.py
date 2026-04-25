@@ -66,6 +66,8 @@ def test_cloud_init_authkey_only_in_approved_paths() -> None:
     # Single canonical occurrence in root-only file body (or tailscale up path).
     assert out.count(fake) == 1, "preauth should appear once in the rendered payload"
     assert "  - curl" in out
+    assert 'docker pull "ghcr.io/javaaze/openclaw-wrapper:pinned"' in out
+    assert '--net=host "ghcr.io/javaaze/openclaw-wrapper:pinned"' in out
     assert "write_files" in out and "dirijor-preauth" in out
     assert "set -euo" in out
     assert not re.search(r"^\s*set\s+-x", out, re.MULTILINE)
@@ -91,5 +93,5 @@ def test_cloud_init_redacted_hash_stable_regression() -> None:
     ).hexdigest()
     assert (
         digest
-        == "908cfbfebbccf96b6b592e984f7157e9e8ac9f57c2fc6f42cc644e79379d43c7"
+        == "8c23f90f987c68941aaf0731e4c61a44fb02aa0ecb45ae4371d0779a4c4d32c7"
     )

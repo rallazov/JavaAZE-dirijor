@@ -384,6 +384,28 @@ describe('postMarketplaceImportDraft', () => {
     });
   });
 
+  it('throws ImportDraftApiError with Core code on 413', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        mockJsonResponse(413, {
+          schema_version: 10,
+          code: 'REQUEST_TOO_LARGE',
+          detail: 'manifest body exceeds 2097152 bytes',
+        })
+      )
+    );
+    await expect(
+      postMarketplaceImportDraft(DEFAULT_API_BASE, '{}')
+    ).rejects.toMatchObject({
+      name: 'ImportDraftApiError',
+      code: 'REQUEST_TOO_LARGE',
+      httpStatus: 413,
+      detail: 'manifest body exceeds 2097152 bytes',
+      schemaVersion: 10,
+    });
+  });
+
   it('throws ImportDraftApiError when the response body is not valid JSON', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockBadJsonResponse(200)));
 

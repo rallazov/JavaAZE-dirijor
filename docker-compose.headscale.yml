@@ -1,0 +1,31 @@
+# Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
+version: '3.9'
+services:
+  headscale:
+    image: headscale/headscale:0.23.0
+    command: ["serve"]
+    restart: unless-stopped
+    volumes:
+      - ./ops/headscale/local/config.yaml:/etc/headscale/config.yaml:ro
+      - ./ops/headscale/local/acl.hujson:/etc/headscale/acl.hujson:ro
+      - headscale_data:/var/lib/headscale
+    networks:
+      - headscale-local
+
+  caddy:
+    image: caddy:2.8.4-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:80"
+    volumes:
+      - ./ops/headscale/local/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - headscale
+    networks:
+      - headscale-local
+
+networks:
+  headscale-local:
+
+volumes:
+  headscale_data:

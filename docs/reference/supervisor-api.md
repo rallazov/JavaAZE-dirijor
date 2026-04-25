@@ -47,7 +47,7 @@ Authoritative detail, canonical JSON signing, error codes (`PARSE` / `SCHEMA` / 
 | `POST` | `/consensus`                  | Multi-agent debate loop (Story 3.2 — real, configurable threshold) + optional semantic cache (Story 4.1) | `200` / `503` (if graph unavailable) |
 | `POST` | `/semantic-cache/ingest`      | Ingest a verified fact with caller-provided embedding (Story 4.1, Qdrant) | `200` / `400` / `503` |
 | `POST` | `/semantic-cache/query`       | Similarity query within a `scope_id` (Story 4.1)                        | `200` / `400` / `503` |
-| `POST` | `/marketplace/templates/import-draft` | Verify manifest + return realm spin draft (Story 7.2 — not `SpinError`) | `200` / `422` |
+| `POST` | `/marketplace/templates/import-draft` | Verify manifest + return realm spin draft (Story 7.2 — not `SpinError`) | `200` / `413` / `422` |
 | `POST` | `/realms/spin`                | Enqueue a realm provisioning job (Story 2.1 — adapter-backed, async)  | `202` / `400` / `409` / `503` |
 | `GET`  | `/realms/{job_id}`            | Poll spin job state (Story 2.1 — `validating → provisioning → ready \| failed`) | `200` / `404` |
 | `POST` | `/realms/{job_id}/mesh/preauth-key` | Mint one Headscale preauth key per job (Story 5.1 — secret not stored on poll body) | `200` / `404` / `409` / `410` / `502` |
@@ -495,6 +495,7 @@ unzip -l audit-bundle.zip
 
 - **Content-Type:** `application/json`
 - **Body:** one JSON object (the manifest file contents — not double-wrapped).
+- **Limit:** 2 MiB. Larger bodies return `413` with `code: "REQUEST_TOO_LARGE"`.
 
 ### Response `200 OK`
 
@@ -531,6 +532,11 @@ Same envelope for verification failures and draft rules:
 ```
 
 - `code` ∈ `PARSE` \| `SCHEMA` \| `SIGNATURE` \| `PINS` (from `verify_template_manifest`), or **`draft_agent_count_exceeded`** when the manifest lists more than **50** agents (after verification succeeds).
+
+### Response `413 Payload Too Large`
+
+Same `{schema_version, code, detail}` envelope, with `code:
+"REQUEST_TOO_LARGE"` when the raw manifest body exceeds 2 MiB.
 
 ### Example (`curl`)
 

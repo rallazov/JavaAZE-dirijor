@@ -1,0 +1,5 @@
+# Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
+:80 {
+  encode zstd gzip
+  reverse_proxy headscale:8080
+}

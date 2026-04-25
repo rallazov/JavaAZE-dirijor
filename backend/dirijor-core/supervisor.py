@@ -142,8 +142,9 @@ SERVICE_VERSION = "0.1.0"
 #     WebSocket `realm.mesh.state`; new `SpinError` codes for mesh HTTP surface.
 #   v9 (Story 7.2, 2026-04-20) — Marketplace import-draft:
 #     `POST /marketplace/templates/import-draft` returns `{schema_version, draft}` on
-#     200 or `{schema_version, code, detail}` on 422 (verify_template_manifest codes
-#     PARSE/SCHEMA/SIGNATURE/PINS plus `draft_agent_count_exceeded`). Not SpinError.
+#     200 or `{schema_version, code, detail}` on 422/413
+#     (verify_template_manifest codes PARSE/SCHEMA/SIGNATURE/PINS plus
+#     `draft_agent_count_exceeded` / `REQUEST_TOO_LARGE`). Not SpinError.
 #   v10 (Story 9.1, 2026-04-23) — DO private-realm module: additive
 #     `outputs.agent_droplet_ids` / `outputs.agent_private_ipv4s` (list[str]) on
 #     terraform-digitalocean spin envelope. No removals, no type changes to existing keys.
@@ -1203,10 +1204,22 @@ app = FastAPI(title="Dirijor Supervisor", version=SERVICE_VERSION)
 # Override with DIRIJOR_CORS_ORIGINS=comma,separated,origins for deployments.
 # Next.js prints a "Network: http://192.168.x.x:3001" URL — that Origin is NOT
 # localhost; allow RFC1918 hosts in dev via regex unless explicitly disabled.
+def _parse_cors_origins_env() -> tuple[bool, list[str]]:
+    raw = os.environ.get("DIRIJOR_CORS_ORIGINS", "")
+    if not raw.strip():
+        return False, []
+    return True, [o.strip() for o in raw.split(",") if o.strip()]
+
+
 def _cors_allow_origins() -> list[str]:
-    raw = os.environ.get("DIRIJOR_CORS_ORIGINS", "").strip()
-    if raw:
-        return [o.strip() for o in raw.split(",") if o.strip()]
+    configured, origins = _parse_cors_origins_env()
+    if configured and origins:
+        return origins
+    if configured:
+        logger.warning(
+            "cors.origins_empty_after_parse",
+            extra={"event": "cors.origins_empty_after_parse"},
+        )
     return [
         "http://localhost:3000",
         "http://localhost:3001",
@@ -1216,7 +1229,8 @@ def _cors_allow_origins() -> list[str]:
 
 
 def _cors_allow_origin_regex() -> str | None:
-    if os.environ.get("DIRIJOR_CORS_ORIGINS", "").strip():
+    configured, origins = _parse_cors_origins_env()
+    if configured and origins:
         return None
     if os.environ.get("DIRIJOR_CORS_STRICT_LOCALHOST", "").strip() in (
         "1",
@@ -2065,7 +2079,10 @@ ImportDraftFailureCode = Literal[
     "SIGNATURE",
     "PINS",
     "draft_agent_count_exceeded",
+    "REQUEST_TOO_LARGE",
 ]
+
+MAX_MARKETPLACE_IMPORT_BYTES = 2 * 1024 * 1024
 
 
 class MarketplaceImportDraftSuccessResponse(BaseModel):
@@ -2462,19 +2479,37 @@ class TerraformAdapter:
         api_key = os.environ.get("DIRIJOR_HEADSCALE_API_KEY", "").strip()
         headers = {"Authorization": f"Bearer {api_key}"}
         out: list[str] = []
-        async with httpx.AsyncClient(
-            base_url=api_url, headers=headers, timeout=30.0
-        ) as hs_client:
-            user_id = await mesh_bootstrap_lib.ensure_realm_user(
-                hs_client, job.realm_id, aborted=lambda: False
-            )
-            for _ in range(req.agent_count):
-                key, _exp = await mesh_bootstrap_lib.issue_preauth_key(
-                    user_id=user_id,
-                    realm_id=job.realm_id,
-                    client=hs_client,
+
+        def aborted() -> bool:
+            return bool(job.outputs.get("destroy_requested_at"))
+
+        try:
+            async with httpx.AsyncClient(
+                base_url=api_url, headers=headers, timeout=30.0
+            ) as hs_client:
+                user_id = await mesh_bootstrap_lib.ensure_realm_user(
+                    hs_client, job.realm_id, aborted=aborted
                 )
-                out.append(key)
+                for _ in range(req.agent_count):
+                    if aborted():
+                        raise SpinValidationError(
+                            code="adapter_error",
+                            message="destroy requested during Headscale preauth mint",
+                            details={"reason": "preauth_mint_aborted"},
+                        )
+                    key, _exp = await mesh_bootstrap_lib.issue_preauth_key(
+                        user_id=user_id,
+                        realm_id=job.realm_id,
+                        client=hs_client,
+                    )
+                    out.append(key)
+        except mesh_bootstrap_lib.HeadscaleMeshError as exc:
+            code = exc.code if exc.code in _SPIN_ERROR_CODES else "adapter_error"
+            raise SpinValidationError(
+                code=code,
+                message=exc.message,
+                details={"reason": "preauth_mint_failed", "headscale_code": exc.code},
+            ) from exc
         return out
 
     async def _run_step(
@@ -2781,7 +2816,7 @@ class TerraformAdapter:
                 )
             raw_list = block["value"]
             if not isinstance(raw_list, list) or not all(
-                isinstance(x, str) for x in raw_list
+                isinstance(x, str) and bool(x.strip()) for x in raw_list
             ):
                 raise SpinValidationError(
                     code="terraform_apply_failed",
@@ -3046,12 +3081,30 @@ def _log_job_done(
 
 _TOPOLOGY_POLL_MAX_S = 90.0
 _TOPOLOGY_POLL_INTERVAL_S = 3.0
+_TOPOLOGY_POLL_SLEEP_SLICE_S = 0.25
+
+
+async def _topology_poll_sleep_or_abort(job: SpinJob) -> bool:
+    """Sleep one poll interval, returning False if destroy is requested."""
+    until = time.monotonic() + _TOPOLOGY_POLL_INTERVAL_S
+    while time.monotonic() < until:
+        if job.outputs.get("destroy_requested_at"):
+            return False
+        await asyncio.sleep(
+            min(_TOPOLOGY_POLL_SLEEP_SLICE_S, max(0.0, until - time.monotonic()))
+        )
+    return not bool(job.outputs.get("destroy_requested_at"))
 
 
 def _headscale_node_online(node: dict[str, Any]) -> bool | None:
     raw = node.get("online")
     if isinstance(raw, bool):
         return raw
+    if isinstance(raw, int):
+        if raw == 1:
+            return True
+        if raw == 0:
+            return False
     if isinstance(raw, str):
         norm = raw.strip().lower()
         if norm in ("true", "1", "yes"):
@@ -3063,9 +3116,9 @@ def _headscale_node_online(node: dict[str, Any]) -> bool | None:
 
 def _agent_patch_from_headscale_node(node: dict[str, Any]) -> dict[str, Any] | None:
     nid: Any = node.get("id")
-    if nid is None:
+    if nid is None or nid == 0 or (isinstance(nid, str) and not nid.strip()):
         nid = node.get("name")
-    if nid is None:
+    if nid is None or nid == 0 or (isinstance(nid, str) and not nid.strip()):
         return None
     name = node.get("name")
     if not isinstance(name, str):
@@ -3111,58 +3164,71 @@ async def _emit_topology_from_headscale_poll(job: SpinJob) -> None:
     api_key = os.environ.get("DIRIJOR_HEADSCALE_API_KEY", "").strip()
     headers = {"Authorization": f"Bearer {api_key}"}
     deadline = time.monotonic() + _TOPOLOGY_POLL_MAX_S
-    while time.monotonic() < deadline:
-        if job.outputs.get("destroy_requested_at"):
-            return
-        try:
-            async with httpx.AsyncClient(
-                base_url=api_url, headers=headers, timeout=15.0
-            ) as hs_client:
+    async with httpx.AsyncClient(
+        base_url=api_url, headers=headers, timeout=15.0
+    ) as hs_client:
+        while time.monotonic() < deadline:
+            if job.outputs.get("destroy_requested_at"):
+                return
+            try:
                 nodes = await mesh_bootstrap_lib.list_realm_tagged_nodes(
                     hs_client, job.realm_id
                 )
-        except mesh_bootstrap_lib.HeadscaleMeshError as exc:
-            logger.info(
-                "mesh.topology.poll_skip",
-                extra={
-                    "event": "mesh.topology.poll_skip",
-                    "realm_id": job.realm_id,
-                    "job_id": job.job_id,
-                    "code": exc.code,
-                },
-            )
-            await asyncio.sleep(_TOPOLOGY_POLL_INTERVAL_S)
-            continue
-        except Exception:
-            logger.exception(
-                "mesh.topology.poll_error",
-                extra={
-                    "event": "mesh.topology.poll_error",
-                    "realm_id": job.realm_id,
-                    "job_id": job.job_id,
-                },
-            )
-            await asyncio.sleep(_TOPOLOGY_POLL_INTERVAL_S)
-            continue
-        if not nodes:
-            await asyncio.sleep(_TOPOLOGY_POLL_INTERVAL_S)
-            continue
-        agents: list[dict[str, Any]] = []
-        for n in nodes:
-            if not isinstance(n, dict):
+            except mesh_bootstrap_lib.HeadscaleMeshError as exc:
+                logger.info(
+                    "mesh.topology.poll_skip",
+                    extra={
+                        "event": "mesh.topology.poll_skip",
+                        "realm_id": job.realm_id,
+                        "job_id": job.job_id,
+                        "code": exc.code,
+                    },
+                )
+                if not await _topology_poll_sleep_or_abort(job):
+                    return
                 continue
-            patch = _agent_patch_from_headscale_node(n)
-            if patch is not None:
-                agents.append(patch)
-        if not agents:
-            await asyncio.sleep(_TOPOLOGY_POLL_INTERVAL_S)
-            continue
-        await broadcast_event(
-            job.realm_id,
-            "topology.delta",
-            {"agents": agents, "source": "headscale"},
-        )
-        return
+            except Exception:
+                logger.exception(
+                    "mesh.topology.poll_error",
+                    extra={
+                        "event": "mesh.topology.poll_error",
+                        "realm_id": job.realm_id,
+                        "job_id": job.job_id,
+                    },
+                )
+                if not await _topology_poll_sleep_or_abort(job):
+                    return
+                continue
+            if not nodes:
+                if not await _topology_poll_sleep_or_abort(job):
+                    return
+                continue
+            agents: list[dict[str, Any]] = []
+            for n in nodes:
+                if not isinstance(n, dict):
+                    continue
+                patch = _agent_patch_from_headscale_node(n)
+                if patch is not None:
+                    agents.append(patch)
+            if not agents:
+                if not await _topology_poll_sleep_or_abort(job):
+                    return
+                continue
+            await broadcast_event(
+                job.realm_id,
+                "topology.delta",
+                {"agents": agents, "source": "headscale"},
+            )
+            return
+    logger.info(
+        "mesh.topology.poll_timeout",
+        extra={
+            "event": "mesh.topology.poll_timeout",
+            "realm_id": job.realm_id,
+            "job_id": job.job_id,
+            "timeout_s": _TOPOLOGY_POLL_MAX_S,
+        },
+    )
 
 
 async def _run_mesh_bootstrap_after_ready(job: SpinJob) -> None:
@@ -3694,6 +3760,10 @@ async def ingest_safety_signal(
             "model": MarketplaceImportDraftFailureResponse,
             "description": "Manifest verification failure or draft_agent_count_exceeded.",
         },
+        413: {
+            "model": MarketplaceImportDraftFailureResponse,
+            "description": "Manifest body exceeds MAX_MARKETPLACE_IMPORT_BYTES.",
+        },
     },
     tags=["marketplace"],
 )
@@ -3705,7 +3775,33 @@ async def marketplace_templates_import_draft(
     Request body must be raw UTF-8 JSON bytes of a single manifest object (same
     bytes semantics as ``verify_template_manifest`` — duplicate keys rejected).
     """
+    raw_content_length = request.headers.get("content-length")
+    if raw_content_length:
+        try:
+            content_length = int(raw_content_length)
+        except ValueError:
+            content_length = None
+        if content_length is not None and content_length > MAX_MARKETPLACE_IMPORT_BYTES:
+            payload = MarketplaceImportDraftFailureResponse(
+                schema_version=SCHEMA_VERSION,
+                code="REQUEST_TOO_LARGE",
+                detail=(
+                    "manifest body exceeds "
+                    f"{MAX_MARKETPLACE_IMPORT_BYTES} bytes"
+                ),
+            )
+            return JSONResponse(status_code=413, content=payload.model_dump(mode="json"))
     raw = await request.body()
+    if len(raw) > MAX_MARKETPLACE_IMPORT_BYTES:
+        payload = MarketplaceImportDraftFailureResponse(
+            schema_version=SCHEMA_VERSION,
+            code="REQUEST_TOO_LARGE",
+            detail=(
+                "manifest body exceeds "
+                f"{MAX_MARKETPLACE_IMPORT_BYTES} bytes"
+            ),
+        )
+        return JSONResponse(status_code=413, content=payload.model_dump(mode="json"))
     verified = tm.verify_template_manifest(
         raw,
         effective_supervisor_schema_version=SCHEMA_VERSION,

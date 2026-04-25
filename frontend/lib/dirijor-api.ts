@@ -404,7 +404,7 @@ export async function postMarketplaceImportDraft(
     return parsed;
   }
 
-  if (status === 422 && parsed && typeof parsed === 'object') {
+  if ((status === 422 || status === 413) && parsed && typeof parsed === 'object') {
     const b = parsed as Record<string, unknown>;
     const code = typeof b.code === 'string' ? b.code : 'bad_response';
     const det = typeof b.detail === 'string' ? b.detail : `HTTP ${status}`;

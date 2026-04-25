@@ -292,6 +292,21 @@ def test_list_realm_tagged_nodes_filters_by_realm_tag():
     asyncio.run(_run())
 
 
+def test_list_realm_tagged_nodes_rejects_non_json_200():
+    tr = httpx.MockTransport(lambda r: httpx.Response(200, text="not json"))
+
+    async def _run() -> None:
+        async with httpx.AsyncClient(
+            transport=tr, base_url="http://h/api/v1"
+        ) as c:
+            with pytest.raises(mb.HeadscaleMeshError) as ei:
+                await mb.list_realm_tagged_nodes(c, "r1")
+        assert ei.value.code == "mesh_headscale_api_error"
+        assert "not valid JSON" in ei.value.message
+
+    asyncio.run(_run())
+
+
 def _hs_handler_topology() -> object:
     last_realm: list[str] = ["unset"]
 
@@ -361,8 +376,20 @@ def test_headscale_topology_agent_patch_uses_canvas_safe_statuses() -> None:
     offline = supervisor._agent_patch_from_headscale_node(
         {"id": "n2", "name": "agent-2", "online": False}
     )
+    online_int = supervisor._agent_patch_from_headscale_node(
+        {"id": "n1-int", "name": "agent-1-int", "online": 1}
+    )
+    offline_int = supervisor._agent_patch_from_headscale_node(
+        {"id": "n2-int", "name": "agent-2-int", "online": 0}
+    )
     unknown = supervisor._agent_patch_from_headscale_node(
         {"id": "n3", "name": "agent-3"}
+    )
+    fallback_name = supervisor._agent_patch_from_headscale_node(
+        {"id": "", "name": "agent-name", "online": True}
+    )
+    missing_id = supervisor._agent_patch_from_headscale_node(
+        {"id": 0, "name": "", "online": True}
     )
 
     assert online is not None
@@ -373,9 +400,18 @@ def test_headscale_topology_agent_patch_uses_canvas_safe_statuses() -> None:
     assert offline["status"] == "degraded"
     assert offline["safetyScore"] == 0.5
     assert offline["meshOnline"] is False
+    assert online_int is not None
+    assert online_int["status"] == "healthy"
+    assert online_int["meshOnline"] is True
+    assert offline_int is not None
+    assert offline_int["status"] == "degraded"
+    assert offline_int["meshOnline"] is False
     assert unknown is not None
     assert unknown["status"] == "pending"
     assert unknown["safetyScore"] == 0.5
+    assert fallback_name is not None
+    assert fallback_name["id"] == "agent-name"
+    assert missing_id is None
 
 
 def test_topology_delta_from_headscale_node_poll(monkeypatch):

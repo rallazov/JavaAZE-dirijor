@@ -240,7 +240,14 @@ async def list_realm_tagged_nodes(
             f"list node failed: HTTP {r.status_code}",
             http_status=r.status_code,
         )
-    data = r.json() if r.content else {}
+    try:
+        data = r.json() if r.content else {}
+    except ValueError as exc:
+        raise HeadscaleMeshError(
+            "mesh_headscale_api_error",
+            "list node response was not valid JSON",
+            http_status=r.status_code,
+        ) from exc
     if not isinstance(data, dict):
         return []
     raw = data.get("nodes")

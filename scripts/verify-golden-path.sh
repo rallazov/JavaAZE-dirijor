@@ -11,6 +11,10 @@ set -euo pipefail
 
 BASE_URL="${DIRIJOR_VERIFY_BASE:-http://localhost:8000}"
 BASE_URL="${BASE_URL%/}"
+if [[ "$BASE_URL" != http://* && "$BASE_URL" != https://* ]]; then
+  echo "FAIL: DIRIJOR_VERIFY_BASE must include http:// or https://. Got: ${BASE_URL}" >&2
+  exit 2
+fi
 # Origin only: reject path, query, or fragment (e.g. .../v1 breaks /health).
 authority="${BASE_URL#*://}"
 if [[ "$authority" == */* || "$authority" == *[\?\#]* || "$authority" == *@* ]]; then

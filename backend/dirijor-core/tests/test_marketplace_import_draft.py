@@ -91,6 +91,11 @@ def test_default_realm_description_truncates_to_2000():
     assert len(s) == 2000
 
 
+def test_default_realm_description_rejects_zero_max_length():
+    with pytest.raises(ValueError, match="max_length"):
+        mid.default_realm_description_imported("tmpl", "1.0.0", max_length=0)
+
+
 def test_import_draft_http_success(monkeypatch):
     monkeypatch.setenv("DIRIJOR_TEMPLATE_MANIFEST_HMAC_KEY", "unit-test-hmac-key")
     monkeypatch.setenv(
@@ -122,6 +127,16 @@ def test_import_draft_parse_errors(raw: bytes, code: str):
     assert j["code"] == code
     assert j["schema_version"] == supervisor.SCHEMA_VERSION
     assert "detail" in j
+
+
+def test_import_draft_rejects_oversized_body():
+    raw = b"x" * (supervisor.MAX_MARKETPLACE_IMPORT_BYTES + 1)
+    r = client.post("/marketplace/templates/import-draft", content=raw)
+    assert r.status_code == 413
+    j = r.json()
+    assert j["code"] == "REQUEST_TOO_LARGE"
+    assert j["schema_version"] == supervisor.SCHEMA_VERSION
+    assert str(supervisor.MAX_MARKETPLACE_IMPORT_BYTES) in j["detail"]
 
 
 def test_import_draft_schema_extra_field(monkeypatch):

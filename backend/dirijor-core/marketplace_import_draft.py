@@ -33,6 +33,8 @@ def default_realm_description_imported(
     max_length: int = _MAX_REALM_DESCRIPTION_LEN,
 ) -> str:
     """Deterministic default for `realm_description`; always ≤ max_length and non-blank."""
+    if max_length < 1:
+        raise ValueError("max_length must be at least 1")
     tid = template_id.strip() if template_id.strip() else "unknown"
     tv = template_version.strip() if template_version.strip() else "unknown"
     base = f"Imported template: {tid} @ {tv}"

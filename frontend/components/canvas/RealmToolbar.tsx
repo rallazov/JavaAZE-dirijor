@@ -20,8 +20,9 @@ const REALM_OPTIONS: { id: string; label: string; disabled?: boolean }[] = [
   { id: '_soon', label: 'Additional realms…', disabled: true },
 ];
 
-/** Reject before `file.text()` to avoid large-string allocation in the tab (server has no separate cap). */
+/** Reject before `file.text()` to match Core's import body cap without large tab allocations. */
 const MAX_IMPORT_TEMPLATE_FILE_BYTES = 2 * 1024 * 1024;
+const IMPORT_DRAFT_TIMEOUT_MS = 15_000;
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -185,9 +186,18 @@ export function RealmToolbar({ className }: { className?: string }) {
                 return;
               }
               setImportBusy(true);
+              const controller = new AbortController();
+              const timeoutId = window.setTimeout(
+                () => controller.abort(),
+                IMPORT_DRAFT_TIMEOUT_MS
+              );
               try {
                 const text = await file.text();
-                const res = await postMarketplaceImportDraft(apiBase(), text);
+                const res = await postMarketplaceImportDraft(
+                  apiBase(),
+                  text,
+                  controller.signal
+                );
                 setDescription(res.draft.realm_description);
                 setPrefillAdapterHint(res.draft.adapter_hint ?? undefined);
                 setPrefillAgentCount(res.draft.agent_count);
@@ -207,6 +217,7 @@ export function RealmToolbar({ className }: { className?: string }) {
                   );
                 }
               } finally {
+                window.clearTimeout(timeoutId);
                 setImportBusy(false);
               }
             }}

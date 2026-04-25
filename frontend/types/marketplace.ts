@@ -8,7 +8,8 @@ export type MarketplaceImportDraftErrorCode =
   | 'SCHEMA'
   | 'SIGNATURE'
   | 'PINS'
-  | 'draft_agent_count_exceeded';
+  | 'draft_agent_count_exceeded'
+  | 'REQUEST_TOO_LARGE';
 
 export interface MarketplaceRealmDraft {
   agent_count: number;
