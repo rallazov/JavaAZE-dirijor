@@ -42,7 +42,8 @@ For **default-deny public egress** droplets, OpenClaw wrappers must **not** use
 loopback or a public laptop IP for Core callbacks. Enable supervisor mesh on
 the machine running Dirijor Core (`DIRIJOR_SUPERVISOR_MESH_ENABLED` and a
 supervisor preauth key), then set **`DIRIJOR_SUPERVISOR_API_URL`** and
-**`DIRIJOR_SUPERVISOR_WS_URL`** to your MagicDNS / tailnet base (see
+**`DIRIJOR_SUPERVISOR_WS_URL`** to your MagicDNS / tailnet base (**`https://`**
+and **`wss://`** on the default port — Tailscale Serve — not `http://…:8000`; see
 [`supervisor-api.md`](../../reference/supervisor-api.md) — “Supervisor mesh”)
 before **`POST /realms/spin`** so `terraform-digitalocean` passes those values
 into droplet cloud-init. Operational verification (tcpdump, full golden path) is

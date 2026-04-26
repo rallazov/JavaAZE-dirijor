@@ -828,19 +828,19 @@ done
 
 ## Supervisor mesh — private callbacks (Story 9.4)
 
-Opt-in: when **`DIRIJOR_SUPERVISOR_MESH_ENABLED`** is truthy (`1` / `true` / `yes`, same convention as mesh bootstrap), Core starts a **`tailscaled`** userspace sidecar, joins Headscale with **`tag:dirijor:realm:supervisor`**, and uses **`tailscale serve`** so agents on default-deny egress can reach the API over the tailnet. **`DIRIJOR_SUPERVISOR_AUTHKEY`** (operator-minted one-shot preauth for the supervisor node) is **required** when the flag is on; if it is missing, `/health` is **503** and one configuration error is logged (**no** key material). **`supervisor_mesh`** in the readiness registry is **`required: true`** always; when the feature is off the probe stays **ready** with an explanatory `detail`.
+Opt-in: when **`DIRIJOR_SUPERVISOR_MESH_ENABLED`** is truthy (`1` / `true` / `yes`, same convention as mesh bootstrap), Core starts a **`tailscaled`** userspace sidecar, joins Headscale with **`tag:dirijor:realm:supervisor`**, and uses **`tailscale serve`** so agents on default-deny egress can reach the API over the tailnet with **HTTPS (443)** to the node’s MagicDNS name, while Core keeps listening on **loopback** only at **`DIRIJOR_SUPERVISOR_PORT`**. **`DIRIJOR_SUPERVISOR_AUTHKEY`** (operator-minted one-shot preauth for the supervisor node) is **required** when the flag is on; if it is missing, `/health` is **503** and one configuration error is logged (**no** key material). **`supervisor_mesh`** in the readiness registry is **`required: true`** always; when the feature is off the probe stays **ready** with an explanatory `detail`.
 
 | Variable | Purpose |
 |---|---|
 | `DIRIJOR_SUPERVISOR_MESH_ENABLED` | Opt-in mesh sidecar + loopback bind path. |
 | `DIRIJOR_SUPERVISOR_AUTHKEY` | Headscale preauth for the supervisor (never commit; never log). |
-| `DIRIJOR_SUPERVISOR_PORT` | Uvicorn listen port (default **8000**); Serve proxies this port on the tailnet. |
+| `DIRIJOR_SUPERVISOR_PORT` | **Loopback** Uvicorn port (default **8000**). `tailscale serve` listens on the tailnet with **HTTPS on 443** and proxies to this port — droplet callbacks use **`https://` / `wss://`** to the mesh hostname (implicit **443**), not `http://…:8000`. |
 | `DIRIJOR_SUPERVISOR_TS_STATE_DIR` | Optional `tailscaled` state directory (default `/var/lib/dirijor-tailscale`). |
 | `DIRIJOR_SUPERVISOR_TS_SOCKET` | Optional control socket path (default `/tmp/dirijor-tailscaled.sock`). |
-| `DIRIJOR_SUPERVISOR_MESH_HOSTNAME` | Optional MagicDNS host fragment for documented default URLs (default **`supervisor.dirijor.internal`** with Story 9.3 `base_domain`). |
+| `DIRIJOR_SUPERVISOR_MESH_HOSTNAME` | Optional MagicDNS hostname for documented default tailnet bases (`https://` / `wss://` — default **`supervisor.dirijor.internal`** with Story 9.3 `base_domain`). |
 | `DIRIJOR_SUPERVISOR_MESH_DRY_RUN` | Test / CI: truthy skips real `tailscaled` subprocesses after config checks. |
-| `DIRIJOR_SUPERVISOR_API_URL` | When set, `terraform-digitalocean` writes `supervisor_api_url` so droplet cloud-init exports **`DIRIJOR_SUPERVISOR_API_URL`** to the wrapper (tailnet HTTP base, **not** `localhost`). |
-| `DIRIJOR_SUPERVISOR_WS_URL` | Same for WebSocket callbacks (e.g. `wss://…/ws/realm/...` when TLS terminates on Serve). |
+| `DIRIJOR_SUPERVISOR_API_URL` | When set, `terraform-digitalocean` writes `supervisor_api_url` so droplet cloud-init exports **`DIRIJOR_SUPERVISOR_API_URL`** to the wrapper. Use **`https://<mesh-host>`** (port **443**) with **`tailscale serve`**, **not** `localhost` or plain `http://…:8000`. |
+| `DIRIJOR_SUPERVISOR_WS_URL` | WebSocket base for wrappers, e.g. **`wss://<mesh-host>/ws/realm/...`** (TLS on Serve). |
 
 Docker/Compose: **`backend/dirijor-core/docker-entrypoint.sh`** binds **`127.0.0.1`** when mesh mode is on and **`0.0.0.0`** when off (Story 8.1 default unchanged). Install **`tailscale`** / **`tailscaled`** in the image or on the host for real joins; HA and key rotation are operator-owned in 9.4.
 

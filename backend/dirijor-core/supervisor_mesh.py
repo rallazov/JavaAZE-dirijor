@@ -67,17 +67,21 @@ def tailscale_socket_path() -> str:
 
 
 def default_supervisor_mesh_api_base() -> str:
-    """Documented default for operator / tfvars (MagicDNS under Story 9.3 recipe)."""
+    """Tailnet HTTP base for operators / tfvars (MagicDNS; Story 9.3 recipe).
+
+    Uses **https** on the default port (443). ``tailscale serve`` terminates TLS
+    on the tailnet and proxies to loopback ``DIRIJOR_SUPERVISOR_PORT`` — peers do
+    not use ``http://…:8000`` unless you run a documented non-Serve path.
+    """
     host = os.environ.get("DIRIJOR_SUPERVISOR_MESH_HOSTNAME", "").strip()
-    if host:
-        return f"http://{host}:{supervisor_listen_port()}"
-    return f"http://supervisor.dirijor.internal:{supervisor_listen_port()}"
+    h = host or "supervisor.dirijor.internal"
+    return f"https://{h}"
 
 
 def default_supervisor_mesh_ws_base() -> str:
     host = os.environ.get("DIRIJOR_SUPERVISOR_MESH_HOSTNAME", "").strip()
     h = host or "supervisor.dirijor.internal"
-    return f"ws://{h}:{supervisor_listen_port()}"
+    return f"wss://{h}"
 
 
 def login_server_url() -> str:

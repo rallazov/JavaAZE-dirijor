@@ -112,12 +112,12 @@ def test_cloud_init_supervisor_callback_urls_in_docker_run() -> None:
         headscale_login_url="https://headscale.test",
         wrapper_image="ghcr.io/wrapper:tag",
         realm_id="realm-fixture",
-        supervisor_api_url="http://supervisor.dirijor.internal:8000",
-        supervisor_ws_url="ws://supervisor.dirijor.internal:8000/ws/realm/x",
+        supervisor_api_url="https://supervisor.dirijor.internal",
+        supervisor_ws_url="wss://supervisor.dirijor.internal/ws/realm/x",
     )
-    assert "DIRIJOR_SUPERVISOR_API_URL=http://supervisor.dirijor.internal:8000" in out
+    assert "DIRIJOR_SUPERVISOR_API_URL=https://supervisor.dirijor.internal" in out
     assert (
-        "DIRIJOR_SUPERVISOR_WS_URL=ws://supervisor.dirijor.internal:8000/ws/realm/x"
+        "DIRIJOR_SUPERVISOR_WS_URL=wss://supervisor.dirijor.internal/ws/realm/x"
         in out
     )
     assert "DIRIJOR_HEADSCALE_API_KEY" not in out

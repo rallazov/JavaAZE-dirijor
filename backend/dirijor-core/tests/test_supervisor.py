@@ -2271,11 +2271,11 @@ def test_terraform_write_tfvars_supervisor_mesh_callbacks(monkeypatch, tmp_path)
         "DIRIJOR_AGENT_WRAPPER_IMAGE", "ghcr.io/example/wrapper:unit"
     )
     monkeypatch.setenv(
-        "DIRIJOR_SUPERVISOR_API_URL", "http://supervisor.dirijor.internal:8000"
+        "DIRIJOR_SUPERVISOR_API_URL", "https://supervisor.dirijor.internal"
     )
     monkeypatch.setenv(
         "DIRIJOR_SUPERVISOR_WS_URL",
-        "ws://supervisor.dirijor.internal:8000/ws/realm",
+        "wss://supervisor.dirijor.internal/ws/realm",
     )
     stub = _StubTerraformRunner()
     tf = supervisor.TerraformAdapter(
@@ -2289,10 +2289,10 @@ def test_terraform_write_tfvars_supervisor_mesh_callbacks(monkeypatch, tmp_path)
     req = supervisor.SpinRequest(realm_description="d", agent_count=1)
     tf._write_tfvars(ws, req, "realm-m", agent_preauth_keys=["pk0"])
     data = json.loads((ws / "terraform.tfvars.json").read_text())
-    assert data["supervisor_api_url"] == "http://supervisor.dirijor.internal:8000"
+    assert data["supervisor_api_url"] == "https://supervisor.dirijor.internal"
     assert (
         data["supervisor_ws_url"]
-        == "ws://supervisor.dirijor.internal:8000/ws/realm"
+        == "wss://supervisor.dirijor.internal/ws/realm"
     )
     raw = (ws / "terraform.tfvars.json").read_text()
     assert "DIRIJOR_HEADSCALE_API_KEY" not in raw

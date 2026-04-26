@@ -56,6 +56,24 @@ def test_login_server_uses_control_plane_base(monkeypatch: pytest.MonkeyPatch) -
     assert sm.login_server_url() == "https://cp.example"
 
 
+def test_default_mesh_callback_bases_match_tailscale_serve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tailnet URLs use https/wss on 443; loopback port must not leak into them."""
+    monkeypatch.delenv("DIRIJOR_SUPERVISOR_MESH_HOSTNAME", raising=False)
+    monkeypatch.setenv("DIRIJOR_SUPERVISOR_PORT", "9000")
+    assert sm.default_supervisor_mesh_api_base() == "https://supervisor.dirijor.internal"
+    assert sm.default_supervisor_mesh_ws_base() == "wss://supervisor.dirijor.internal"
+
+
+def test_default_mesh_callback_bases_custom_hostname(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DIRIJOR_SUPERVISOR_MESH_HOSTNAME", "sup.example")
+    assert sm.default_supervisor_mesh_api_base() == "https://sup.example"
+    assert sm.default_supervisor_mesh_ws_base() == "wss://sup.example"
+
+
 @pytest.mark.parametrize("flag", ["1", "true", "yes"])
 def test_mesh_enabled_truthy(flag: str, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DIRIJOR_SUPERVISOR_MESH_ENABLED", flag)
