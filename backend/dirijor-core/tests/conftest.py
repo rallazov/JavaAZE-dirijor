@@ -11,6 +11,16 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 _SUPERVISOR_ROOT = Path(__file__).resolve().parent.parent
 if str(_SUPERVISOR_ROOT) not in sys.path:
     sys.path.insert(0, str(_SUPERVISOR_ROOT))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_supervisor_mesh_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hermetic defaults — opt-in tests set mesh env explicitly."""
+    monkeypatch.delenv("DIRIJOR_SUPERVISOR_MESH_ENABLED", raising=False)
+    monkeypatch.delenv("DIRIJOR_SUPERVISOR_AUTHKEY", raising=False)
+    monkeypatch.delenv("DIRIJOR_SUPERVISOR_MESH_DRY_RUN", raising=False)

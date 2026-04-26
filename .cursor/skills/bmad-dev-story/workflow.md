@@ -306,6 +306,9 @@ Load config from `{project-root}/_bmad/bmm/config.yaml` and resolve:
     <action>Validate implementation meets ALL story acceptance criteria; enforce quantitative thresholds explicitly</action>
     <action if="regression tests fail">STOP and fix before continuing - identify breaking changes immediately</action>
     <action if="new tests fail">STOP and fix before continuing - ensure implementation correctness</action>
+
+    <action>Git and BMAD traceability: before the first <code>git commit</code> for this story (and again before the final "story complete" push if the working tree is large), run
+      <code>scripts/git/story-commit-hints.sh --staged</code> after <code>git add</code>. If the tool warns that multiple story/epic areas are touched, either split into separate commits (one per story) or write a commit subject and body that name <strong>every</strong> area (avoid a subject that describes only one feature while the diff includes another story's tree—see megacommit anti-pattern in <code>docs/guides/git-and-story-commits.md</code>). Prefer subjects that include the active BMAD <code>{{story_key}}</code> (e.g. <code>feat(9-4-supervisor-mesh): …</code>).</action>
   </step>
 
   <step n="8" goal="Validate and mark task complete ONLY when fully done">

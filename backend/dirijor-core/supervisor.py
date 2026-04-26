@@ -90,6 +90,7 @@ import audit_export as audit_export_lib
 import marketplace_import_draft as marketplace_import_draft_lib
 import mesh_bootstrap as mesh_bootstrap_lib
 import otel as otel_lib
+import supervisor_mesh as supervisor_mesh_lib
 import template_manifest as tm
 from safety_policy import (
     AnomalyPolicyDocument,
@@ -148,6 +149,9 @@ SERVICE_VERSION = "0.1.0"
 #   v10 (Story 9.1, 2026-04-23) — DO private-realm module: additive
 #     `outputs.agent_droplet_ids` / `outputs.agent_private_ipv4s` (list[str]) on
 #     terraform-digitalocean spin envelope. No removals, no type changes to existing keys.
+#   Story 9.4 (2026-04-25) — Readiness registry adds `supervisor_mesh` (required: true
+#     with opt-in probe — same precedent as Story 2.1 `realm_manager`: SCHEMA_VERSION
+#     unchanged).
 SCHEMA_VERSION = 10
 STARTED_AT = time.monotonic()
 STARTUP_GRACE_S = 1.0
@@ -1024,6 +1028,28 @@ def _probe_mesh() -> tuple[bool, str | None]:
     )
 
 
+def _probe_supervisor_mesh() -> tuple[bool, str | None]:
+    """Story 9.4 — required when ``DIRIJOR_SUPERVISOR_MESH_ENABLED`` is on."""
+    if not supervisor_mesh_lib.supervisor_mesh_enabled():
+        return True, "supervisor mesh disabled (set DIRIJOR_SUPERVISOR_MESH_ENABLED=1 to opt in)"
+    if not supervisor_mesh_lib.supervisor_mesh_authkey():
+        logger.error(
+            "supervisor_mesh.probe.authkey_missing",
+            extra={"event": "supervisor_mesh.probe.authkey_missing"},
+        )
+        return (
+            False,
+            "DIRIJOR_SUPERVISOR_AUTHKEY missing or blank (supervisor mesh requires operator preauth)",
+        )
+    err = supervisor_mesh_lib.startup_error()
+    if err:
+        bounded = err if len(err) <= 220 else err[:217] + "..."
+        return False, bounded
+    if not supervisor_mesh_lib.runtime_ready():
+        return False, "supervisor mesh sidecar not ready yet"
+    return True, None
+
+
 def _probe_realtime_channel() -> tuple[bool, str | None]:
     # Story 3.3 v0.1 probe: the WebSocket route is registered at import time,
     # so if this module imported cleanly the channel is structurally ready.
@@ -1064,6 +1090,7 @@ REGISTRY: list[DependencyCheck] = [
     DependencyCheck("semantic_cache", False, _probe_semantic_cache),
     DependencyCheck("anomaly_policy", False, _probe_anomaly_policy),
     DependencyCheck("mesh", False, _probe_mesh),
+    DependencyCheck("supervisor_mesh", True, _probe_supervisor_mesh),
 ]
 
 
@@ -1197,7 +1224,21 @@ class HealthStatus(BaseModel):
 
 # --- FastAPI Server ----------------------------------------------------------
 
-app = FastAPI(title="Dirijor Supervisor", version=SERVICE_VERSION)
+
+@asynccontextmanager
+async def _app_lifespan(_app: FastAPI):
+    await supervisor_mesh_lib.ensure_sidecar_started_async()
+    try:
+        yield
+    finally:
+        await supervisor_mesh_lib.shutdown_sidecar_async()
+
+
+app = FastAPI(
+    title="Dirijor Supervisor",
+    version=SERVICE_VERSION,
+    lifespan=_app_lifespan,
+)
 
 # Browser canvas (Next.js) calls Core from another origin (e.g. :3001 → :8000).
 # Without CORS, `fetch` fails closed and the UI surfaces `network_error`.
@@ -2459,6 +2500,8 @@ class TerraformAdapter:
             "headscale_login_url": headscale_login_url,
             "realm_name": realm_id,
             "ssh_public_key": os.environ.get("DIRIJOR_DO_SSH_PUBLIC_KEY", "").strip(),
+            "supervisor_api_url": os.environ.get("DIRIJOR_SUPERVISOR_API_URL", "").strip(),
+            "supervisor_ws_url": os.environ.get("DIRIJOR_SUPERVISOR_WS_URL", "").strip(),
             "wrapper_image": wrapper_image,
         }
         tfvars_path = ws / "terraform.tfvars.json"

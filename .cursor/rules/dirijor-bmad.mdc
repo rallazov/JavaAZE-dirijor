@@ -21,3 +21,9 @@ alwaysApply: true
 ## Implementation discipline
 
 - Keep PRD claims and architecture diagram aligned with what is actually implemented; call out stubs (e.g. supervisor consensus placeholder) when planning work.
+
+## Git and story traceability
+
+- Prefer **one story per commit** (or a clearly scoped series). Commit subjects should include the **BMAD story key** or an unambiguous scope; do not describe only one feature if the diff spans multiple story trees (see `docs/guides/git-and-story-commits.md`).
+- After `git add`, run **`scripts/git/story-commit-hints.sh --staged`**; keep **`sprint-status.yaml`** `development_status` and the detailed **`stories:`** block in sync when you update statuses.
+- Load **`.cursor/skills/bmad-story-git-traceability/SKILL.md`** when the user asks for commit/story alignment or “avoid megacommit / misaligned log.”

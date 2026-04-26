@@ -68,3 +68,17 @@ variable "agent_preauth_keys" {
     error_message = "agent_preauth_keys must have the same length as agent_count (Story 9.2)"
   }
 }
+
+variable "supervisor_api_url" {
+  type        = string
+  default     = ""
+  sensitive   = false
+  description = "Optional HTTP base URL for droplet→supervisor callbacks over the tailnet (Story 9.4 → DIRIJOR_SUPERVISOR_API_URL on the wrapper). Leave empty for local-only / operator-injected paths."
+}
+
+variable "supervisor_ws_url" {
+  type        = string
+  default     = ""
+  sensitive   = false
+  description = "Optional WebSocket URL for realm canvas channel (Story 9.4 → DIRIJOR_SUPERVISOR_WS_URL). Must not reuse loopback NEXT_PUBLIC_* values on droplets."
+}

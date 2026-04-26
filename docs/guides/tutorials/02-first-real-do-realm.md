@@ -35,3 +35,15 @@ and checked-in Terraform variables. See
 `terraform/modules/headscale-control/README.md` for the full runbook, DNS/TLS
 requirements, local compose recipe, and the `private-realm` firewall
 reachability trade-off.
+
+## Supervisor on the tailnet (Story 9.4)
+
+For **default-deny public egress** droplets, OpenClaw wrappers must **not** use
+loopback or a public laptop IP for Core callbacks. Enable supervisor mesh on
+the machine running Dirijor Core (`DIRIJOR_SUPERVISOR_MESH_ENABLED` and a
+supervisor preauth key), then set **`DIRIJOR_SUPERVISOR_API_URL`** and
+**`DIRIJOR_SUPERVISOR_WS_URL`** to your MagicDNS / tailnet base (see
+[`supervisor-api.md`](../../reference/supervisor-api.md) — “Supervisor mesh”)
+before **`POST /realms/spin`** so `terraform-digitalocean` passes those values
+into droplet cloud-init. Operational verification (tcpdump, full golden path) is
+Story **9.6**.

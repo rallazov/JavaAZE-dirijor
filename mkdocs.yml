@@ -90,6 +90,8 @@ nav:
           - Consensus: product/concepts/consensus.md
           - Zero-Trust by Default: product/concepts/zero-trust.md
   - Guides:
+      - "Git, commits & BMAD stories": guides/git-and-story-commits.md
+      - "BMAD pipeline (go plan)": guides/bmad-pipeline.md
       - Tutorials:
           - First private realm: guides/tutorials/01-first-realm.md
   - Reference:

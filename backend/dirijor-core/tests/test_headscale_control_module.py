@@ -58,6 +58,7 @@ def test_headscale_control_module_tls_proxy_and_no_raw_headscale_exposure() -> N
     assert "/var/lib/dirijor/headscale" in cloud_init
     assert "127.0.0.1:8080:8080" not in cloud_init
     assert "8080:8080" not in cloud_init
+    assert "tag:dirijor:realm:supervisor" in cloud_init
 
     assert 'port_range       = "80"' in main_tf
     assert 'port_range       = "443"' in main_tf

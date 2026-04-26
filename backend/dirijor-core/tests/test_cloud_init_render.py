@@ -33,6 +33,8 @@ def _render_like_terraform(
     headscale_login_url: str,
     wrapper_image: str,
     realm_id: str,
+    supervisor_api_url: str = "",
+    supervisor_ws_url: str = "",
 ) -> str:
     """Terraform ``templatefile``-equivalent for the variables we interpolate."""
     return (
@@ -40,6 +42,8 @@ def _render_like_terraform(
         .replace("${headscale_login_url}", headscale_login_url)
         .replace("${wrapper_image}", wrapper_image)
         .replace("${realm_id}", realm_id)
+        .replace("${supervisor_api_url}", supervisor_api_url)
+        .replace("${supervisor_ws_url}", supervisor_ws_url)
     )
 
 
@@ -67,7 +71,10 @@ def test_cloud_init_authkey_only_in_approved_paths() -> None:
     assert out.count(fake) == 1, "preauth should appear once in the rendered payload"
     assert "  - curl" in out
     assert 'docker pull "ghcr.io/javaaze/openclaw-wrapper:pinned"' in out
-    assert '--net=host "ghcr.io/javaaze/openclaw-wrapper:pinned"' in out
+    assert "docker run -d --name dirijor-openclaw-wrapper" in out
+    assert "--net=host" in out
+    assert "DIRIJOR_SUPERVISOR_API_URL=" in out
+    assert "DIRIJOR_SUPERVISOR_WS_URL=" in out
     assert "write_files" in out and "dirijor-preauth" in out
     assert "set -euo" in out
     assert not re.search(r"^\s*set\s+-x", out, re.MULTILINE)
@@ -93,5 +100,24 @@ def test_cloud_init_redacted_hash_stable_regression() -> None:
     ).hexdigest()
     assert (
         digest
-        == "8c23f90f987c68941aaf0731e4c61a44fb02aa0ecb45ae4371d0779a4c4d32c7"
+        == "c51db6e2cc1520bdb647acd7efb308ce4fd982574bf233e7f653fec41b524112"
     )
+
+
+def test_cloud_init_supervisor_callback_urls_in_docker_run() -> None:
+    t = _read_template()
+    out = _render_like_terraform(
+        t,
+        preauth_key="__REDACTED__",
+        headscale_login_url="https://headscale.test",
+        wrapper_image="ghcr.io/wrapper:tag",
+        realm_id="realm-fixture",
+        supervisor_api_url="http://supervisor.dirijor.internal:8000",
+        supervisor_ws_url="ws://supervisor.dirijor.internal:8000/ws/realm/x",
+    )
+    assert "DIRIJOR_SUPERVISOR_API_URL=http://supervisor.dirijor.internal:8000" in out
+    assert (
+        "DIRIJOR_SUPERVISOR_WS_URL=ws://supervisor.dirijor.internal:8000/ws/realm/x"
+        in out
+    )
+    assert "DIRIJOR_HEADSCALE_API_KEY" not in out

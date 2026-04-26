@@ -103,6 +103,13 @@ Set `DIRIJOR_HEADSCALE_PUBLIC_URL` explicitly in production even though
 `control_plane_base_url()` can derive it from an API URL ending in `/api/v1`.
 The canonical values have no trailing slash.
 
+## ACL — supervisor tag (Story 9.4)
+
+The bundled `acl.hujson` grants `tag:dirijor:realm:supervisor` (Tailscale Serve
+ports **443** and **8000**) so realm agents can reach a supervisor that joined
+the mesh with that tag. A catch-all rule remains for local/dev; tighten in
+production once you rely only on tagged nodes.
+
 ## Realm Reachability
 
 This module enables the public-URL Phase-0 path. Agent droplets created by

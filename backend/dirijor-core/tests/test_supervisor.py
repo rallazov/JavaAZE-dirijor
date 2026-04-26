@@ -205,19 +205,27 @@ def test_health_never_500s_when_probe_raises(monkeypatch):
 
 def test_registry_contains_required_dependencies():
     names = {dep.name: dep for dep in supervisor.REGISTRY}
-    assert {"graph_compiled", "consensus_engine", "semantic_cache", "anomaly_policy", "mesh"} <= set(
-        names
-    )
+    assert {
+        "graph_compiled",
+        "consensus_engine",
+        "semantic_cache",
+        "anomaly_policy",
+        "mesh",
+        "supervisor_mesh",
+    } <= set(names)
     assert names["graph_compiled"].required is True
     assert names["consensus_engine"].required is True
     assert names["semantic_cache"].required is False
     assert names["anomaly_policy"].required is False
     assert names["mesh"].required is False
+    assert names["supervisor_mesh"].required is True
 
     checks = supervisor.resolve_readiness()
     assert checks["semantic_cache"]["detail"] == "not configured"
     assert checks["mesh"]["ready"] is True
     assert "mesh bootstrap disabled" in (checks["mesh"]["detail"] or "")
+    assert checks["supervisor_mesh"]["ready"] is True
+    assert "supervisor mesh disabled" in (checks["supervisor_mesh"]["detail"] or "")
 
 
 # --- AC 4 (Story 3.1) + Story 3.2 AC 6 --------------------------------------
@@ -2208,6 +2216,8 @@ def test_terraform_write_tfvars_allow_public_egress_default_false(
         "headscale_login_url": "https://headscale.test",
         "realm_name": "realm-abc",
         "ssh_public_key": _TF_TEST_SSH_PUB,
+        "supervisor_api_url": "",
+        "supervisor_ws_url": "",
         "wrapper_image": "ghcr.io/example/wrapper:unit",
     }
 
@@ -2244,8 +2254,49 @@ def test_terraform_write_tfvars_allow_public_egress_from_env(monkeypatch, tmp_pa
         "headscale_login_url": "https://headscale.test",
         "realm_name": "realm-xyz",
         "ssh_public_key": _TF_TEST_SSH_PUB,
+        "supervisor_api_url": "",
+        "supervisor_ws_url": "",
         "wrapper_image": "ghcr.io/example/wrapper:unit",
     }
+
+
+def test_terraform_write_tfvars_supervisor_mesh_callbacks(monkeypatch, tmp_path):
+    monkeypatch.delenv("DIRIJOR_ALLOW_PUBLIC_EGRESS", raising=False)
+    monkeypatch.setenv("DIRIJOR_DO_SSH_PUBLIC_KEY", _TF_TEST_SSH_PUB)
+    monkeypatch.setenv("DIRIJOR_HEADSCALE_PUBLIC_URL", "https://headscale.test")
+    monkeypatch.setenv("DIRIJOR_HEADSCALE_API_URL", "http://headscale.test/api/v1")
+    monkeypatch.setenv("DIRIJOR_HEADSCALE_API_KEY", "k")
+    monkeypatch.setenv("DIRIJOR_MESH_BOOTSTRAP_ENABLED", "1")
+    monkeypatch.setenv(
+        "DIRIJOR_AGENT_WRAPPER_IMAGE", "ghcr.io/example/wrapper:unit"
+    )
+    monkeypatch.setenv(
+        "DIRIJOR_SUPERVISOR_API_URL", "http://supervisor.dirijor.internal:8000"
+    )
+    monkeypatch.setenv(
+        "DIRIJOR_SUPERVISOR_WS_URL",
+        "ws://supervisor.dirijor.internal:8000/ws/realm",
+    )
+    stub = _StubTerraformRunner()
+    tf = supervisor.TerraformAdapter(
+        workspace_root=tmp_path,
+        subprocess_runner=stub,
+        env_provider=_tf_env_provider,
+        module_source=_TERRAFORM_PRIVATE_REALM_MODULE,
+    )
+    ws = tmp_path / "ws-mesh"
+    ws.mkdir()
+    req = supervisor.SpinRequest(realm_description="d", agent_count=1)
+    tf._write_tfvars(ws, req, "realm-m", agent_preauth_keys=["pk0"])
+    data = json.loads((ws / "terraform.tfvars.json").read_text())
+    assert data["supervisor_api_url"] == "http://supervisor.dirijor.internal:8000"
+    assert (
+        data["supervisor_ws_url"]
+        == "ws://supervisor.dirijor.internal:8000/ws/realm"
+    )
+    raw = (ws / "terraform.tfvars.json").read_text()
+    assert "DIRIJOR_HEADSCALE_API_KEY" not in raw
+    assert "pk0" in raw
 
 
 def test_spin_validation_error_accepts_egress_policy_denied():

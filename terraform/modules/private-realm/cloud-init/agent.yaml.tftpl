@@ -32,4 +32,7 @@ runcmd:
   - |
       set -euo pipefail
       docker pull "${wrapper_image}"
-      docker run -d --name dirijor-openclaw-wrapper --restart=unless-stopped --net=host "${wrapper_image}"
+      docker run -d --name dirijor-openclaw-wrapper --restart=unless-stopped --net=host \
+        -e "DIRIJOR_SUPERVISOR_API_URL=${supervisor_api_url}" \
+        -e "DIRIJOR_SUPERVISOR_WS_URL=${supervisor_ws_url}" \
+        "${wrapper_image}"

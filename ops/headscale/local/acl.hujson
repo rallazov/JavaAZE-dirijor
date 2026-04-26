@@ -1,11 +1,16 @@
 // Copyright (c) 2026 Ramin Allazov (JavaAZE). All Rights Reserved.
+// Story 9.4: supervisor node tag + agent→supervisor TCP (443/8000). Catch-all retained for local dev.
 {
   "groups": {},
   "tagOwners": {
     "tag:dirijor": [],
-    "tag:dirijor:realm": []
+    "tag:dirijor:realm": [],
+    "tag:dirijor:realm:supervisor": []
   },
   "acls": [
+    { "action": "accept", "src": ["*"], "dst": ["tag:dirijor:realm:supervisor:443"] },
+    { "action": "accept", "src": ["*"], "dst": ["tag:dirijor:realm:supervisor:8000"] },
+    { "action": "accept", "src": ["tag:dirijor:realm:supervisor"], "dst": ["*:*"] },
     { "action": "accept", "src": ["*"], "dst": ["*:*"] }
   ]
 }

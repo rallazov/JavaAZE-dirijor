@@ -44,7 +44,13 @@ later stories so the firewall applies.
 - **Outputs:** `agent_droplet_ids`, `agent_private_ipv4s` (splat over
   `digitalocean_droplet.agent`, `count.index` order).
 
-**Out of scope here:** Story 9.4 (supervisor-in-mesh private callback path).
+**Supervisor mesh (Story 9.4):** for **default-deny egress** realms, enable
+supervisor mesh on Core and set droplet callback bases to the **tailnet**
+hostname (MagicDNS / `100.x`), **not** a public routable IP. See
+[`docs/reference/supervisor-api.md`](../../../docs/reference/supervisor-api.md)
+(Supervisor mesh) and optional `supervisor_api_url` / `supervisor_ws_url` module
+variables (wired from `DIRIJOR_SUPERVISOR_API_URL` / `DIRIJOR_SUPERVISOR_WS_URL`
+on the supervisor when writing `terraform.tfvars.json`).
 
 ## Bootstrapping agents (Story 9.2)
 
@@ -55,6 +61,8 @@ later stories so the firewall applies.
 | `headscale_login_url` | no | TLS base for `tailscale up --login-server=`. Aligned with supervisor `control_plane_base_url()` (typically `DIRIJOR_HEADSCALE_PUBLIC_URL` or API URL without `/api/v1`). |
 | `wrapper_image` | no | **OpenClaw** wrapper image; supervisor reads **`DIRIJOR_AGENT_WRAPPER_IMAGE`**. The image must be pullable by a fresh droplet without interactive `docker login`; use a public image, pre-baked registry credentials, or a private mirror reachable under your egress posture. |
 | `agent_preauth_keys` | **yes** | `list(string)`, **length = `var.agent_count`**. One-shot Headscale preauth per droplet; minted in Core **before** `terraform plan/apply` so the first droplet boot can enroll. Re-apply of the same job mints a fresh set (droplets may be replaced if `user_data` changes). |
+| `supervisor_api_url` | no | Optional (default empty). When non-empty, cloud-init adds **`DIRIJOR_SUPERVISOR_API_URL`** to the wrapper container for tailnet HTTP callbacks (Story 9.4). |
+| `supervisor_ws_url` | no | Optional (default empty). Tailnet WebSocket base for **`DIRIJOR_SUPERVISOR_WS_URL`**. |
 
 **Cloud-init outline (Ubuntu 22.04):** `apt` install **`ca-certificates`**, **`curl`**, and **`docker.io`**; install Tailscale via **`https://tailscale.com/install.sh`**; write preauth to **`/root/dirijor-preauth`** (mode **0600**); **`tailscale up`** with `--login-server`, `--authkey` from the file, `--advertise-tags=tag:dirijor:realm:<realm_id>`; **`docker pull` / `docker run --net=host`** for the wrapper. No `set -x` / no `echo` of secrets. Hardened environments should replace the public install-script path with a vetted package mirror or pre-baked base image.
 

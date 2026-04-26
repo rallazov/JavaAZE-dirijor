@@ -7,7 +7,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY supervisor.py .
+COPY *.py ./
+COPY docker-entrypoint.sh ./docker-entrypoint.sh
+RUN chmod +x docker-entrypoint.sh
 
 EXPOSE 8000
 
@@ -18,4 +20,4 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=3 \
 sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status==200 else 1)" \
     || exit 1
 
-CMD ["python", "-m", "uvicorn", "supervisor:app", "--host", "0.0.0.0", "--port", "8000"]
+ENTRYPOINT ["./docker-entrypoint.sh"]

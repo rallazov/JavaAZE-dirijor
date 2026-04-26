@@ -80,6 +80,18 @@ def test_private_realm_story_9_2_mesh_variables() -> None:
     assert "length(var.agent_preauth_keys) == var.agent_count" in vtf
 
 
+def test_private_realm_story_9_4_supervisor_callback_variables() -> None:
+    vtf = _read(
+        _repo_root() / "terraform" / "modules" / "private-realm" / "variables.tf"
+    )
+    assert 'variable "supervisor_api_url"' in vtf
+    assert 'variable "supervisor_ws_url"' in vtf
+    api_block = vtf.split('variable "supervisor_api_url"', 1)[1].split(
+        'variable "supervisor_ws_url"', 1
+    )[0]
+    assert "default" in api_block and '""' in api_block
+
+
 def test_private_realm_story_9_1_outputs_splat() -> None:
     otf = _read(_repo_root() / "terraform" / "modules" / "private-realm" / "outputs.tf")
     assert 'output "agent_droplet_ids"' in otf

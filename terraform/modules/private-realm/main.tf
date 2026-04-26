@@ -109,10 +109,12 @@ resource "digitalocean_droplet" "agent" {
   user_data = templatefile(
     "${path.module}/cloud-init/agent.yaml.tftpl",
     {
-      preauth_key         = var.agent_preauth_keys[count.index]
-      headscale_login_url = var.headscale_login_url
-      wrapper_image       = var.wrapper_image
-      realm_id            = var.realm_name
+      preauth_key          = var.agent_preauth_keys[count.index]
+      headscale_login_url  = var.headscale_login_url
+      wrapper_image        = var.wrapper_image
+      realm_id             = var.realm_name
+      supervisor_api_url   = var.supervisor_api_url
+      supervisor_ws_url    = var.supervisor_ws_url
     }
   )
 

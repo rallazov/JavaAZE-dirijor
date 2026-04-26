@@ -119,7 +119,8 @@ Pydantic model: `RootStatus`.
     "realm_manager":     { "ready": true,  "required": true,  "detail": null },
     "semantic_cache":    { "ready": false, "required": false, "detail": "not configured" },
     "anomaly_policy":    { "ready": true,  "required": false, "detail": null },
-    "mesh":              { "ready": true, "required": false, "detail": "mesh bootstrap disabled (set DIRIJOR_MESH_BOOTSTRAP_ENABLED=1 to opt in)" }
+    "mesh":              { "ready": true, "required": false, "detail": "mesh bootstrap disabled (set DIRIJOR_MESH_BOOTSTRAP_ENABLED=1 to opt in)" },
+    "supervisor_mesh":   { "ready": true, "required": true,  "detail": "supervisor mesh disabled (set DIRIJOR_SUPERVISOR_MESH_ENABLED=1 to opt in)" }
   },
   "realtime": {
     "connections": 0,
@@ -168,7 +169,8 @@ Pydantic model: `HealthStatus`.
     "realm_manager":     { "ready": true,  "required": true,  "detail": null },
     "semantic_cache":    { "ready": false, "required": false, "detail": "not configured" },
     "anomaly_policy":    { "ready": true,  "required": false, "detail": null },
-    "mesh":              { "ready": true, "required": false, "detail": "mesh bootstrap disabled (set DIRIJOR_MESH_BOOTSTRAP_ENABLED=1 to opt in)" }
+    "mesh":              { "ready": true, "required": false, "detail": "mesh bootstrap disabled (set DIRIJOR_MESH_BOOTSTRAP_ENABLED=1 to opt in)" },
+    "supervisor_mesh":   { "ready": true, "required": true,  "detail": "supervisor mesh disabled (set DIRIJOR_SUPERVISOR_MESH_ENABLED=1 to opt in)" }
   }
 }
 ```
@@ -194,7 +196,8 @@ status code and `status` field differ.
     "realm_manager":     { "ready": true,  "required": true,  "detail": null },
     "semantic_cache":    { "ready": false, "required": false, "detail": "not configured" },
     "anomaly_policy":    { "ready": true,  "required": false, "detail": null },
-    "mesh":              { "ready": true, "required": false, "detail": "mesh bootstrap disabled (set DIRIJOR_MESH_BOOTSTRAP_ENABLED=1 to opt in)" }
+    "mesh":              { "ready": true, "required": false, "detail": "mesh bootstrap disabled (set DIRIJOR_MESH_BOOTSTRAP_ENABLED=1 to opt in)" },
+    "supervisor_mesh":   { "ready": true, "required": true,  "detail": "supervisor mesh disabled (set DIRIJOR_SUPERVISOR_MESH_ENABLED=1 to opt in)" }
   }
 }
 ```
@@ -820,6 +823,28 @@ for i in $(seq 1 20); do
   sleep 0.2
 done
 ```
+
+---
+
+## Supervisor mesh — private callbacks (Story 9.4)
+
+Opt-in: when **`DIRIJOR_SUPERVISOR_MESH_ENABLED`** is truthy (`1` / `true` / `yes`, same convention as mesh bootstrap), Core starts a **`tailscaled`** userspace sidecar, joins Headscale with **`tag:dirijor:realm:supervisor`**, and uses **`tailscale serve`** so agents on default-deny egress can reach the API over the tailnet. **`DIRIJOR_SUPERVISOR_AUTHKEY`** (operator-minted one-shot preauth for the supervisor node) is **required** when the flag is on; if it is missing, `/health` is **503** and one configuration error is logged (**no** key material). **`supervisor_mesh`** in the readiness registry is **`required: true`** always; when the feature is off the probe stays **ready** with an explanatory `detail`.
+
+| Variable | Purpose |
+|---|---|
+| `DIRIJOR_SUPERVISOR_MESH_ENABLED` | Opt-in mesh sidecar + loopback bind path. |
+| `DIRIJOR_SUPERVISOR_AUTHKEY` | Headscale preauth for the supervisor (never commit; never log). |
+| `DIRIJOR_SUPERVISOR_PORT` | Uvicorn listen port (default **8000**); Serve proxies this port on the tailnet. |
+| `DIRIJOR_SUPERVISOR_TS_STATE_DIR` | Optional `tailscaled` state directory (default `/var/lib/dirijor-tailscale`). |
+| `DIRIJOR_SUPERVISOR_TS_SOCKET` | Optional control socket path (default `/tmp/dirijor-tailscaled.sock`). |
+| `DIRIJOR_SUPERVISOR_MESH_HOSTNAME` | Optional MagicDNS host fragment for documented default URLs (default **`supervisor.dirijor.internal`** with Story 9.3 `base_domain`). |
+| `DIRIJOR_SUPERVISOR_MESH_DRY_RUN` | Test / CI: truthy skips real `tailscaled` subprocesses after config checks. |
+| `DIRIJOR_SUPERVISOR_API_URL` | When set, `terraform-digitalocean` writes `supervisor_api_url` so droplet cloud-init exports **`DIRIJOR_SUPERVISOR_API_URL`** to the wrapper (tailnet HTTP base, **not** `localhost`). |
+| `DIRIJOR_SUPERVISOR_WS_URL` | Same for WebSocket callbacks (e.g. `wss://…/ws/realm/...` when TLS terminates on Serve). |
+
+Docker/Compose: **`backend/dirijor-core/docker-entrypoint.sh`** binds **`127.0.0.1`** when mesh mode is on and **`0.0.0.0`** when off (Story 8.1 default unchanged). Install **`tailscale`** / **`tailscaled`** in the image or on the host for real joins; HA and key rotation are operator-owned in 9.4.
+
+**ADR:** No separate ADR-0006 file — bind + sidecar decision is documented here and in `terraform/modules/private-realm/README.md`. Full packet-evidence steps live in Story **9.6**.
 
 ---
 

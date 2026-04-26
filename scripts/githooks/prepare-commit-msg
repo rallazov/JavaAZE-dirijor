@@ -1,0 +1,25 @@
+#!/usr/bin/env sh
+# Optional: install with  git config core.hooksPath scripts/githooks
+# Appends commented hints to the commit message template. Lines starting with #
+# are stripped by git from the final message when using the editor.
+
+MSG_FILE=${1:?}
+MSG_KIND=${2:-}
+
+# On merge/squash commits, do not append template hints.
+case "$MSG_KIND" in
+merge|squash) exit 0 ;;
+esac
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+HINT="$ROOT/scripts/git/story-commit-hints.sh"
+test -x "$HINT" || exit 0
+
+{
+  echo ""
+  echo "# --- story-commit-hints (informational; delete before commit if noisy) ---"
+  "$HINT" --staged 2>&1 | sed 's/^/# /'
+  echo "# --- end story-commit-hints ---"
+} >>"$MSG_FILE"
+
+exit 0
